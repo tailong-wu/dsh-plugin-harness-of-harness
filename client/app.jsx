@@ -52,6 +52,8 @@ function runStatusLabel(t, status) {
       return text(t, 'statusStopped');
     case 'done':
       return text(t, 'statusDone');
+    case 'partial':
+      return text(t, 'statusPartial');
     case 'error':
       return text(t, 'statusError');
     default:

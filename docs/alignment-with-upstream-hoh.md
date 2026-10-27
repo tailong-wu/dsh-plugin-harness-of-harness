@@ -18,7 +18,7 @@ Upstream is [`hoh-lite`](https://github.com/Flesymeb/HarnessOfHarness), the
 
 **Read Part III before quoting Part I.** An aligned mechanism and a defect can
 sit one line apart: the read-only role is aligned at the tool level and weaker at
-the workspace level, in the same feature. Part III records the eight defects found
+the workspace level, in the same feature. Part III records the ten defects found
 in review, and the test that now pins each fix.
 
 ---
@@ -47,6 +47,8 @@ in review, and the test that now pins each fix.
 | **W-6** | A project directory was accepted on trust | **was a hole — fixed** (realpath + prefix guard) |
 | **W-7** | A dead session silently reused another | **was wrong — fixed** (refused) |
 | **W-8** | Non-integer budget, unescaped fence, unbounded body | **were defects — fixed** |
+| **W-9** | A run reported `done` while its iterations were `partial` | **was a hole — fixed** (run now `partial`) |
+| **W-10** | Provider selection, timeout overflow, stranded role machine | **were defects — fixed** |
 | **U-1 … U-11** | Benchmark machinery, integrity, policy, atomicity | **deliberately out of scope** |
 
 ---
@@ -394,9 +396,9 @@ policies (**U-6**), no demo-id evidence matrix (**U-9**).
 # Part III — Defects found in review, and how they were closed
 
 The first preview release went through a code review against upstream and against
-the host's own API contract. Eight defects were found. All eight are **fixed**,
-and each fix is pinned by a test, so this section is a record of what was wrong
-and what now guarantees it stays right — not a list of live gaps.
+the host's own API contract. Ten defects were found, in two rounds. All ten are
+**fixed**, and each fix is pinned by a test, so this section is a record of what
+was wrong and what now guarantees it stays right — not a list of live gaps.
 
 Keeping the diagnosis here is deliberate: a fix without a record of the failure it
 prevents tends to get reverted by the next person who finds the old behaviour more
@@ -575,6 +577,60 @@ refused outright.
 **Verified.** *a non-integer iteration budget is refused, not replaced by the
 default*, *a goal cannot break out of its prompt fence* (all three roles).
 
+## W-9 — A run reported `done` while its iterations were `partial` (fixed)
+
+Found in the second review round, in code this plugin owns. It is the same
+fail-open class as W-1, one level up, and it survived that fix.
+
+**Was.** The loop's final line was
+
+```js
+if (state.status === 'running') state.status = ... 'done';
+```
+
+Nothing aggregated `iteration.status`. Reproduced against the real engine with a
+Tester that settles `stopReason: 'max-tokens'` on every turn:
+
+```
+run.status = done | iter.status = partial | error = null
+phases = planner:done, developer:done, tester:failed
+```
+
+The loop then ran iteration 2 as if nothing were wrong. A Tester that crashed on
+every iteration produced a green run with zero verified evidence.
+
+**Now.** The run's final status is derived from its iterations: `done` only when
+every iteration is `done`, `partial` when an iteration ran to completion without
+acceptance, `error` when an iteration could not proceed, `stopped` when the run
+was cancelled. `RUN_STATUSES` gained `partial`, the panel renders it, and
+`state.error` says which iteration and why.
+
+**Verified.** *a run whose Tester fails is not reported as done* asserts the run
+is `partial` with a reason and that the loop still spends its full iteration
+budget; *repair rounds stop at the configured ceiling* now asserts the run —
+not only the iteration — is `partial`.
+
+## W-10 — Three more defects from the second round (fixed)
+
+| Defect | Was | Now |
+|---|---|---|
+| Provider selection ignored capabilities | `pickProvider` fell back to `names[0]`, but every turn carries `maxDepth`, which needs `capabilities.depthLimit`; a provider without it failed the first Planner with an opaque capability error | a provider must advertise `depthLimit`; otherwise the start is refused with a message naming the gap. The provider and parent are resolved **once at admission** and reused, so the recorded `max_depth_effective` cannot drift from the enforced cap |
+| `phaseTimeoutSeconds` had no upper bound | the engine passes `seconds * 1000` to `setTimeout`; above 2^31 − 1 ms Node clamps the delay to 1 ms, so any value ≥ 2 147 484 s made **every role time out instantly** | capped at `MAX_PHASE_TIMEOUT_SECONDS` = 2 147 483, with the overflow reason in the error |
+| A refused `finish()` stranded the role machine | `finish()` throws for an iteration without a Developer and leaves its active iteration set; the engine logged and continued, so the next `begin()` threw out of the loop and turned the whole run into `error` | the failure path calls `machine.abandon()`, so one bookkeeping fault cannot take down the next iteration |
+
+Two smaller records fixes came with them: a Tester skipped after a repair is
+recorded with its `round` instead of a hardcoded `0`, and a Developer that fails
+now records the verification turn as `skipped` instead of ending the iteration at
+`planner, developer` with no trace that verification never ran. `dispose()` also
+marks records disposed so a loop still unwinding cannot keep writing into a
+directory the plugin no longer owns.
+
+**Verified.** *a start is refused when no provider supports delegation depth*
+and *a named session that is not live is refused instead of reusing a root
+session* cover admission-time resolution. `stateDir` containment is asserted in
+*stateDir is held to the same containment as the project directory*; the timeout
+ceiling is enforced in `resolveConfig` alongside the other configuration bounds.
+
 ---
 
 # Part IV — Deliberately out of scope
@@ -674,7 +730,7 @@ because "the document was wrong before" is itself part of the record.
 |---|---|
 | Receipt `max_depth` "is the **absolute** depth cap, which is 1 in the ordinary case", and a real run shows `max_depth: 1`. | `src/records.js` writes `config.childMaxDepth`, which is `0` — and all four recorded runs show `0`. The absolute cap (`1`) is computed in `spawnRole` and never recorded. **W-3.** |
 | Role bindings are "serialized with upstream spellings (`workspace_access`, `max_depth`)". | Upstream `RoleBinding.to_dict` has **no** `max_depth`, and has a `tools{godot_mcp, godot_docs}` sub-object this plugin omits. Only `workspace_access` (and `role`/`harness`/`model`/`reasoning_effort`) match. **A-2.** |
-| `npm test` runs "27 tests, including the ten alignment tests". | The count drifted with every fix: `31` (`13 + 9 + 9`) at the review baseline, `41` (`17 + 15 + 9`) after the review fixes. |
+| `npm test` runs "27 tests, including the ten alignment tests". | The count drifted with every fix: `31` (`13 + 9 + 9`) at the review baseline, `44` (`17 + 18 + 9`) after the review fixes. |
 | "One real run, read as evidence" presented `hoh-20261023-140931-f877a7` as verification of A-1…A-6 after the D-2/D-3 fixes. | That run predates the current source: its last artifact is from 14:36, while `src/engine.js` and `src/contract.js` were last modified at 16:09 and 16:08. Its gaps are all `minor`, a severity **outside** `{blocker, high, medium, low}`, and every tester round is `round: 0`. It is evidence for A-1/A-2/A-3/A-6 and for *the absence* of repair — not for the repaired behaviour. |
 | The old A-3 residual named only the missing read-only copy. | Upstream also **detects** mutation by hashing the candidate; this plugin neither prevents at workspace level nor detects. **U-1** and **A-3**. |
 | The old document called `high` a non-blocking "polish" severity in its tests while the schema told the child that `high` blocks. | Both statements are still in the code; the document had not noticed the conflict. **W-4.** |
@@ -728,7 +784,7 @@ as necessary and a real run as sufficient.
 # How to re-check this document
 
 ```sh
-npm test        # 41 tests, 17 of them in tests/alignment.test.mjs
+npm test        # 44 tests, 17 of them in tests/alignment.test.mjs
 npm run smoke   # parses cordis.patch.yml and cross-checks the presets and tools
 node <plugin-write-skill>/scripts/validate-names.mjs --manifest ./dsh-plugin.naming.json
 ```
@@ -753,7 +809,7 @@ corrections table above does. A run directory is a dated witness.
 1. A mechanism belongs in **Part I** only if both the code and a test pin it. If
    one of the two is missing, it is a defect, and it belongs in Part III — a fixed
    defect stays there as a record with the test that now pins the fix, which is
-   why W-1 … W-8 are still listed after being closed.
+   why W-1 … W-10 are still listed after being closed.
 2. An item belongs in **Part II** only with the upstream behaviour it replaces
    written next to it, so a reader can judge the trade rather than trust the
    adjective "better".

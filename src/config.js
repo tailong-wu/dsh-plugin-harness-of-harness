@@ -3,12 +3,13 @@
  * @module dsh-plugin-harness-of-harness/config
  */
 
-import { isAbsolute } from 'node:path';
-
 import z from '@deepseek-ai/schemastery';
+
+import { resolveWriteDir } from './paths.js';
 
 import {
   MAX_DIRECTORY_CHARS,
+  MAX_PHASE_TIMEOUT_SECONDS,
   MAX_INNER_REPAIRS_LIMIT,
   MAX_ITERATIONS,
   MIN_ITERATIONS,
@@ -71,9 +72,13 @@ export function resolveConfig(config = {}) {
   }
 
   const phaseTimeoutSeconds = config.phaseTimeoutSeconds ?? 3600;
-  if (!Number.isInteger(phaseTimeoutSeconds) || phaseTimeoutSeconds < 0) {
+  // Upper bound is not arbitrary: the engine passes `seconds * 1000` to
+  // `setTimeout`, which takes a 32-bit signed millisecond value. A larger value
+  // overflows and Node silently clamps it to 1 ms, so every role would time out
+  // immediately instead of never. 0 still means "no ceiling".
+  if (!Number.isInteger(phaseTimeoutSeconds) || phaseTimeoutSeconds < 0 || phaseTimeoutSeconds > MAX_PHASE_TIMEOUT_SECONDS) {
     throw new Error(
-      `phaseTimeoutSeconds must be a whole number of seconds, 0 or greater (received ${String(phaseTimeoutSeconds)}).`,
+      `phaseTimeoutSeconds must be a whole number from 0 to ${MAX_PHASE_TIMEOUT_SECONDS}, or 0 for no ceiling (received ${String(phaseTimeoutSeconds)}).`,
     );
   }
 
@@ -88,11 +93,15 @@ export function resolveConfig(config = {}) {
   }
   // `stateDir` is the other place a run writes, and it comes from profile YAML
   // rather than from a request — but pointing it at a system tree would put run
-  // records somewhere no project belongs, so the same containment applies. A
-  // relative value is refused too: it would resolve against whatever the host's
-  // working directory happens to be.
-  if (stateDir !== '' && !isAbsolute(stateDir)) {
-    throw new Error(`stateDir must be an absolute path when set (received "${stateDir}").`);
+  // records somewhere no project belongs, so the same containment the project
+  // directory gets applies here too. A relative value is refused as well: it
+  // would resolve against whatever the host's working directory happens to be.
+  //
+  // The directory may not exist yet (the run creates it), so the check does not
+  // require it to; the returned real path is unusable here because resolution
+  // happens per run, which is why only the containment decision is made now.
+  if (stateDir !== '') {
+    resolveWriteDir(stateDir, { mustExist: false, label: 'stateDir' });
   }
 
   const testerPolicy = config.testerPolicy ?? 'repair-then-next';

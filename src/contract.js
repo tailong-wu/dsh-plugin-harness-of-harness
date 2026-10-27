@@ -34,7 +34,15 @@ export const ROLE_LABELS = {
 };
 
 /** Whole-run lifecycle values. */
-export const RUN_STATUSES = ['running', 'stopping', 'stopped', 'done', 'error'];
+/**
+ * Whole-run lifecycle values.
+ *
+ * `partial` means the loop ran to completion but at least one iteration did not
+ * finish accepted — every role ran, and the QA verdict did not pass. It is
+ * distinct from `error`, which means the run could not proceed, and from `done`,
+ * which must only mean every iteration was accepted.
+ */
+export const RUN_STATUSES = ['running', 'stopping', 'stopped', 'done', 'partial', 'error'];
 
 /** Lifecycle values for one role's turn inside an iteration. */
 export const PHASE_STATUSES = ['pending', 'running', 'done', 'failed', 'skipped'];
@@ -96,6 +104,16 @@ export const SEVERITIES = ['blocker', 'high', 'medium', 'low'];
  * blockers, which the `passed` field alone would wave through.
  */
 export const BLOCKING_SEVERITIES = ['blocker'];
+
+/**
+ * Upper bound on `phaseTimeoutSeconds`.
+ *
+ * The engine hands `seconds * 1000` to `setTimeout`, whose delay is a 32-bit
+ * signed integer. Anything above 2^31 - 1 ms overflows and Node clamps it to
+ * 1 ms, which would make every role time out instantly. The bound is expressed
+ * in seconds, just under that ceiling.
+ */
+export const MAX_PHASE_TIMEOUT_SECONDS = 2_147_483;
 
 /** Upper bound on same-iteration Developer repairs. */
 export const MAX_INNER_REPAIRS_LIMIT = 5;

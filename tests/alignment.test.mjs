@@ -47,7 +47,7 @@ function makeHost(verdicts = []) {
     // A provider that supports both start-time options the engine uses. A
     // provider missing `outputSchema` gets no structured-output request, so the
     // fake must advertise it to exercise the real Tester path.
-    getProvider: () => ({ capabilities: { agentPreset: true, outputSchema: true } }),
+    getProvider: () => ({ capabilities: { agentPreset: true, outputSchema: true, depthLimit: true } }),
     startActivation: async (spec) => {
       const name = spec.label;
       calls.push(spec);
@@ -182,7 +182,11 @@ test('repair rounds stop at the configured ceiling', async () => {
   // planner + (developer, tester) + one repair pair.
   assert.equal(host.calls.length, 5);
   assert.equal(state.history[0].phases.filter((phase) => phase.role === 'developer').length, 2);
-  assert.equal(state.status, 'done');
+  // The ceiling was reached and the iteration never passed, so the RUN is
+  // `partial`: it ran to completion without acceptance. Reporting `done` here
+  // would be a green run with no verified evidence.
+  assert.equal(state.history[0].status, 'partial');
+  assert.equal(state.status, 'partial');
 
   engine.dispose();
 });
@@ -295,7 +299,9 @@ test('enforceRolePresets off keeps every role on the session preset', async () =
 test('a provider without schema support is not asked for a structured verdict', async () => {
   const projectDir = project();
   const host = makeHost([]);
-  host.ctx.subagents.getProvider = () => ({ capabilities: { agentPreset: true } });
+  // Supports delegation depth (so the loop can run at all) but not structured
+  // output, which is the combination this test is about.
+  host.ctx.subagents.getProvider = () => ({ capabilities: { agentPreset: true, depthLimit: true } });
   const engine = createEngine({
     ctx: host.ctx,
     config: {

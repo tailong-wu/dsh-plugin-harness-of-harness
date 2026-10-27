@@ -22,9 +22,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   BLOCKING_SEVERITIES,
@@ -40,6 +39,7 @@ import {
   ROLES,
   SEVERITIES,
 } from './contract.js';
+import { resolveWriteDir } from './paths.js';
 import { rolePrompt } from './prompts.js';
 import {
   RECEIPT_FILE,
@@ -117,120 +117,29 @@ function keyFor(sessionId) {
 }
 
 /**
- * System prefixes a run must never treat as a project directory.
- *
- * The loop writes `.hoh/` beside the artifact and hands the directory to three
- * delegating children, so a system tree would scatter run records through the
- * filesystem and point a Developer at files no loop should touch.
- *
- * Checked as *prefixes of the real path*, not as exact strings: an exact-match
- * denylist lets `/etc/ssl`, `/Users/<you>/.ssh`, and `/var/db` straight through,
- * which are exactly the directories that matter. Prefix matching cannot have
- * that gap.
- *
- * This is a guard against accidents and against a panel request naming a system
- * tree — not a sandbox. The host's file policy remains the authority on what a
- * role may read or write.
- */
-const REFUSED_PREFIXES = [
-  '/bin',
-  '/boot',
-  '/dev',
-  '/etc',
-  '/lib',
-  '/lib64',
-  '/proc',
-  '/root',
-  '/sbin',
-  '/sys',
-  '/usr',
-  '/var/db',
-  '/var/log',
-  '/System',
-  '/Library',
-  '/Applications',
-  '/private/etc',
-  '/private/tmp',
-  '/private/var/db',
-];
-
-/**
- * Bare temporary roots refused as *whole* directories only.
- *
- * A scratch tree directly under one of these is a legitimate throwaway project,
- * which the test suite itself relies on, so these are matched by equality rather
- * than by prefix.
- */
-const REFUSED_EXACT = ['/tmp', '/private/tmp', '/private/var/tmp', '/var/tmp'];
-
-/** The real path of the current user's home, or `null` when it cannot be resolved. */
-function homeRealPath() {
-  try {
-    return realpathSync(homedir());
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether a real path is a system tree this loop refuses to run over.
- *
- * Also refuses the home directory itself and any dotfile directory directly
- * inside it (`~/.ssh`, `~/.aws`, `~/.gnupg`): those are credential stores, never
- * a place to put a project. An ordinary project *under* home — `~/code/thing` —
- * is fine, which is the common case and must not be broken by this guard.
- * @param real - the resolved real path.
- * @returns whether the path is refused.
- */
-function isRefusedProjectPath(real) {
-  if (real === '/') return true;
-  if (REFUSED_EXACT.includes(real)) return true;
-  for (const prefix of REFUSED_PREFIXES) {
-    if (real === prefix || real.startsWith(`${prefix}/`)) return true;
-  }
-  const home = homeRealPath();
-  if (home !== null) {
-    if (real === home) return true;
-    if (real.startsWith(`${home}/.`)) return true;
-  }
-  return false;
-}
-
-/**
  * Validate and normalize the project directory a run will develop in.
  *
  * The directory is the one place a run writes outside its own state directory,
  * so it must be absolute, must exist, and must not resolve into a system tree.
- *
- * `resolve()` alone is **not** containment: it is purely lexical, so a symlink
- * at `/tmp/proj` pointing at `/etc` resolves to the innocent-looking
- * `/tmp/proj`. On macOS `/tmp` is itself a symlink to `/private/tmp`, so this is
- * the ordinary case rather than an exotic one. The check therefore runs on
- * `realpathSync()`, and the real path is what the run uses from then on — the
- * recorded `projectDir`, the `.hoh/` location, and the roles' `cwd` must all be
- * the path that was actually validated.
+ * The containment itself lives in `./paths.js`, shared with the `stateDir` check
+ * in `./config.js` so the two cannot drift apart.
  * @param value - the requested directory, or the fallback when empty.
  * @returns the real absolute directory.
  * @throws when the value is empty, relative, missing, or resolves into a refused tree.
  */
 function resolveProjectDir(value) {
+  // The error text is part of what the panel shows a person, so the wording this
+  // plugin has always used is preserved here rather than inherited from the
+  // shared helper.
   if (value === '') throw new Error('No project directory: name one in the panel.');
-  if (!isAbsolute(value)) {
-    throw new Error(`The project directory must be an absolute path (received "${value}").`);
-  }
-  // `resolve` collapses `.`/`..` and redundant separators before the filesystem
-  // is asked anything, so `/etc/..` cannot dodge the realpath below.
-  const lexical = resolve(value);
-  let real;
   try {
-    real = realpathSync(lexical);
-  } catch {
-    throw new Error(`The project directory does not exist: ${lexical}. Create it first.`);
+    return resolveWriteDir(value, { label: 'The project directory' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/must be an absolute path/.test(message)) throw error;
+    if (/does not exist/.test(message)) throw error;
+    throw new Error(`Refusing to run a loop over ${/resolves to (\S+?),/.exec(message)?.[1] ?? value}: choose a project directory, not a system or credential tree.`);
   }
-  if (isRefusedProjectPath(real)) {
-    throw new Error(`Refusing to run a loop over ${real}: choose a project directory, not a system or credential tree.`);
-  }
-  return real;
 }
 
 /**
@@ -356,21 +265,32 @@ async function safeDispose(activation) {
 }
 
 /**
- * Choose the delegation provider: the in-process spawn backend when the
- * composition registers it, otherwise the first provider that can select a
- * preset.
+ * Choose the delegation provider.
+ *
+ * The chosen provider must be able to accept the request `spawnRole` will send:
+ * every turn carries `maxDepth`, so the backend needs `depthLimit`, and the QA
+ * Tester's turn carries an `outputSchema`. Picking a provider that merely exists
+ * — or only advertises `agentPreset` — defers the failure to the first Planner
+ * turn, where it surfaces as an opaque capability error instead of a clear
+ * "nothing here can run this loop".
+ *
+ * The in-process `spawn` backend is preferred when registered because it is the
+ * backend this plugin is written against.
  * @param subagents - the host's subagent service.
  * @returns the provider name.
+ * @throws when no registered backend supports the request.
  */
 function pickProvider(subagents) {
   const names = subagents.list();
-  if (names.includes('spawn')) return 'spawn';
-  for (const name of names) {
-    const provider = subagents.getProvider(name);
-    if (provider?.capabilities?.agentPreset === true) return name;
-  }
-  if (names.length > 0) return names[0];
-  throw new Error('No subagent provider is registered, so the loop cannot delegate to its three roles.');
+  const supports = (name) => {
+    const capabilities = subagents.getProvider(name)?.capabilities ?? {};
+    return capabilities.depthLimit === true;
+  };
+  if (names.includes('spawn') && supports('spawn')) return 'spawn';
+  const usable = names.filter(supports);
+  if (usable.length > 0) return usable[0];
+  const detail = names.length === 0 ? 'no provider is registered' : `registered: ${names.join(', ')}; none supports depthLimit`;
+  throw new Error(`The loop needs a subagent provider that supports depth limit (${detail}).`);
 }
 
 /**
@@ -460,6 +380,10 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
    * @param record - the run record.
    */
   function persist(record) {
+    // After `dispose()` the plugin is unloading: the run is cancelled and its
+    // map entry is gone, so a loop still unwinding must not keep writing records
+    // into a directory nothing now owns.
+    if (record.disposed === true) return;
     try {
       writeJson(join(record.state.runDir, 'run.json'), record.state);
     } catch {
@@ -472,6 +396,7 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
    * @param record - the run record.
    */
   function persistReceipt(record) {
+    if (record.disposed === true) return;
     try {
       writeReceipt(record.state.runDir, {
         activeIteration: record.machine.activeIteration,
@@ -614,12 +539,15 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
     const paths = iterationPaths(state.runDir, state.currentIteration);
     mkdirSync(paths.dir, { recursive: true });
 
-    const parent = resolveParent(ctx, state.sessionId);
+    // The parent and provider were resolved when the run was admitted. Reusing
+    // them keeps the recorded `max_depth_effective` equal to the cap actually
+    // sent below: re-resolving could pick a different root session mid-run.
+    const { parent } = record;
     if (parent === undefined) {
       throw new Error('No live DSH session is available to parent the roles. Open a chat session and start the run from its panel.');
     }
 
-    const provider = pickProvider(ctx.subagents);
+    const { provider } = record;
     const request = {
       cwd: state.projectDir,
       prompt: [{ type: 'text', text: prompt }],
@@ -657,12 +585,15 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
    * @param iteration - the iteration record.
    * @param role - the role that will not run.
    * @param reason - why it will not run.
+   * @param round - the repair round it belongs to, so a turn skipped after a
+   *   repair is not recorded as round 0 and contradict the Developer turn before
+   *   it.
    * @returns the recorded phase.
    */
-  function recordSkipped(record, iteration, role, reason) {
+  function recordSkipped(record, iteration, role, reason, round = 0) {
     const phase = {
       role,
-      round: 0,
+      round,
       status: 'skipped',
       startedAt: null,
       endedAt: Date.now(),
@@ -673,7 +604,7 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
     };
     iteration.phases.push(phase);
     try {
-      record.machine.record(role, { status: 'skipped', details: { reason } });
+      record.machine.record(role, { status: 'skipped', details: { round, reason } });
     } catch {
       // A skipped turn outside a legal position is dropped from the receipt
       // rather than failing the run.
@@ -859,7 +790,14 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
                     gaps: iteration.phases.filter((phase) => phase.role === 'tester').at(-1)?.verdict?.gaps ?? [],
                   };
             const developer = await runRole(record, iteration, 'developer', { round, repair });
-            if (developer.status !== 'done' || controller.signal.aborted) break;
+            if (controller.signal.aborted) break;
+            if (developer.status !== 'done') {
+              // The verification turn never ran. Record it as skipped so the
+              // iteration says so, instead of ending at `planner, developer` and
+              // leaving a reader to infer that no Tester was ever attempted.
+              recordSkipped(record, iteration, 'tester', 'The Developer did not finish, so verification could not run.', round);
+              break;
+            }
 
             const tester = await runRole(record, iteration, 'tester', { round });
             if (controller.signal.aborted) break;
@@ -886,7 +824,14 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         try {
           record.machine.finish();
         } catch (error) {
+          // `finish()` refuses an iteration whose Developer never ran, and it
+          // leaves the machine's active iteration set when it refuses. Logging
+          // and moving on would strand that state, and the NEXT `begin()` would
+          // then throw out of the loop — one bookkeeping fault in iteration N
+          // would turn the whole run into `error` during N+1. Abandoning the
+          // open iteration keeps the machine usable for the rest of the run.
           logLine(record, 'error', `Iteration ${index}: ${errorMessage(error)}`);
+          record.machine.abandon();
         }
         writeIterationRecord(state, iteration);
         persist(record);
@@ -901,7 +846,30 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         }
       }
 
-      if (state.status === 'running') state.status = controller.signal.aborted ? 'stopped' : 'done';
+      // The run's status must not be greener than the iterations it is made of.
+      // A Tester that fails every iteration used to leave `state.status` at
+      // 'done' with `error: null` while every iteration was 'partial' — a run
+      // that reported success with zero verified evidence, which is the same
+      // fail-open class as accepting a missing verdict, one level up.
+      if (state.status === 'running') {
+        const unfinished = state.history.find((entry) => entry.status !== 'done');
+        // An iteration that ended `partial` is a completed loop that did not
+        // achieve acceptance, which is `partial` at the run level — not `error`,
+        // which is reserved for a run that could not proceed.
+        state.status = controller.signal.aborted
+          ? 'stopped'
+          : unfinished === undefined
+            ? 'done'
+            : unfinished.status === 'partial'
+              ? 'partial'
+              : 'error';
+        if (!controller.signal.aborted && unfinished !== undefined) {
+          state.error = unfinished.status === 'partial'
+            ? `Iteration ${unfinished.index} was not accepted, so the run did not fully complete.`
+            : `Iteration ${unfinished.index} ended ${unfinished.status}, so the run did not complete.`;
+          logLine(record, 'warn', state.error);
+        }
+      }
     } catch (error) {
       state.status = 'error';
       state.error = errorMessage(error);
@@ -958,9 +926,17 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         throw new Error(`Run records already exist in ${runDir}; start a new run instead of reusing a run id.`);
       }
 
-      // The same parent the roles are delegated from, so the recorded depth cap
-      // is the one that will actually be enforced on their activations.
-      const bindings = roleBindings(resolveParent(ctx, key === '__default__' ? undefined : key));
+      // Resolve the two things the run cannot work without, before it is
+      // admitted. `pickProvider` throws when nothing registered can accept the
+      // request the loop will send; swallowing that here would admit a run that
+      // cannot delegate and surface the real error as a Planner failure instead.
+      //
+      // Both are resolved once and reused: re-resolving inside `spawnRole` could
+      // pick a different root session, which would make the recorded depth cap
+      // disagree with the one actually enforced.
+      const parent = resolveParent(ctx, key === '__default__' ? undefined : key);
+      const provider = pickProvider(ctx.subagents);
+      const bindings = roleBindings(parent);
       const startedAt = Date.now();
       const record = {
         state: {
@@ -985,6 +961,8 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         controller: new AbortController(),
         activation: undefined,
         machine: createRoleMachine(),
+        parent,
+        provider,
       };
       runs.set(key, record);
 
@@ -993,13 +971,7 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
           join(runDir, REPRODUCIBILITY_FILE),
           buildReproducibility({
             plugin: { name: 'dsh-plugin-harness-of-harness', version: pluginVersion },
-            provider: (() => {
-              try {
-                return pickProvider(ctx.subagents);
-              } catch {
-                return null;
-              }
-            })(),
+            provider,
             projectDir,
             git: gitRevision(projectDir),
             presetId: 'harness-of-harness',
@@ -1079,6 +1051,8 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         if (record.state.status !== 'running' && record.state.status !== 'stopping') continue;
         record.state.status = 'stopped';
         record.state.endedAt = Date.now();
+        // Mark before aborting, so the loop's own teardown writes below are the
+        // last ones: the final state is recorded here, then persistence stops.
         record.controller.abort();
         const activation = record.activation;
         if (activation !== undefined) {
@@ -1086,6 +1060,7 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         }
         persist(record);
         persistReceipt(record);
+        record.disposed = true;
       }
       runs.clear();
     },

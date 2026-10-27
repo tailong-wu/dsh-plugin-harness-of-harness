@@ -61,7 +61,7 @@ function makeHost(behavior = 'ok', unregisteredSessions = new Set()) {
 
   const subagents = {
     list: () => ['spawn'],
-    getProvider: () => ({ capabilities: { agentPreset: true, outputSchema: true } }),
+    getProvider: () => ({ capabilities: { agentPreset: true, outputSchema: true, depthLimit: true } }),
     startActivation: async (spec) => {
       // Enforce `maxDepth` the way the real service does: it caps the child's
       // ABSOLUTE depth, which is the parent's depth plus one. A delegating host
@@ -90,6 +90,10 @@ function makeHost(behavior = 'ok', unregisteredSessions = new Set()) {
       if (behavior !== 'never') {
         if (behavior === 'planner-error' && /Planner/.test(spec.label)) {
           finish({ output: [{ type: 'text', text: 'the planner gave up' }], stopReason: 'error' });
+        } else if (behavior === 'tester-error' && /QA Tester/.test(spec.label)) {
+          // A Tester turn that stops early: no verdict, and a non-completed stop
+          // reason, which is what the engine reads as a failed phase.
+          finish({ output: [{ type: 'text', text: 'the tester ran out of tokens' }], stopReason: 'max-tokens' });
         } else {
           writeArtifact(spec.label, spec.request.prompt[0].text);
           // The QA Tester answers with a structured verdict, as the real role
@@ -558,6 +562,28 @@ test('a panel disabled by configuration still registers its routes, and reports 
   engine.dispose();
 });
 /**
+ * A run must not be greener than the iterations it is made of. A Tester that
+ * fails every iteration used to leave the run `done` with `error: null` while
+ * every iteration was `partial` — success reported with zero verified evidence,
+ * the same fail-open class as accepting a missing verdict, one level up.
+ */
+test('a run whose Tester fails is not reported as done', async () => {
+  const projectDir = project();
+  // A Tester turn that stops early submits no verdict and its phase is `failed`.
+  const { engine, host } = makeEngine({ projectDir, behavior: 'tester-error' });
+
+  const state = engine.start({ sessionId: 'session-parent', goal: 'Tester dies.', iterations: 2 });
+  await settled(state);
+
+  assert.equal(state.history[0].phases.find((phase) => phase.role === 'tester').status, 'failed');
+  assert.equal(state.history[0].status, 'partial', 'an iteration without a verdict is partial');
+  assert.equal(state.status, 'partial', 'the run must inherit the unfinished iteration');
+  assert.match(state.error ?? '', /not accepted|did not/, 'the run must say why it is not done');
+  assert.equal(host.delegations.length, 6, 'the loop still runs its full budget');
+  engine.dispose();
+});
+
+/**
  * A named session must be live. Falling back to "some root session" would parent
  * a caller's run to a different conversation: the roles would surface in another
  * session's subagent list, and that session's `hoh_status` would report a run it
@@ -586,4 +612,52 @@ test('an unnamed session still falls back to the root session', async () => {
   engine.stop({});
   await settled(state);
   engine.dispose();
+});
+
+/**
+ * A provider must be able to accept the request the loop will send. Every role
+ * turn carries `maxDepth`, which needs `capabilities.depthLimit`; picking a
+ * provider that merely exists defers the failure to the first Planner turn as an
+ * opaque capability error instead of a clear refusal.
+ */
+test('a start is refused when no provider supports delegation depth', async () => {
+  const projectDir = project();
+  const host = makeHost('never');
+  host.ctx.subagents.getProvider = () => ({ capabilities: { agentPreset: true } });
+  const engine = createEngine({
+    ctx: host.ctx,
+    config: {
+      showPanel: true,
+      stateDir: '',
+      defaultIterations: 1,
+      phaseTimeoutSeconds: 0,
+      childMaxDepth: 0,
+      testerPolicy: 'repair-then-next',
+      maxInnerRepairs: 2,
+      enforceRolePresets: true,
+    },
+    fallbackProjectDirectory: () => projectDir,
+  });
+
+  assert.throws(
+    () => engine.start({ sessionId: 'p', goal: 'x', iterations: 1 }),
+    /depth limit/,
+    'the refusal must name the missing capability',
+  );
+  assert.equal(engine.read('p'), null, 'no run may be admitted');
+  engine.dispose();
+});
+
+/**
+ * `stateDir` is the second place a run writes. It comes from profile YAML rather
+ * than a request, but it gets the same containment the project directory gets.
+ */
+test('stateDir is held to the same containment as the project directory', async () => {
+  const { resolveConfig } = await import('../src/config.js');
+  for (const bad of ['runs', '/etc', '/usr', '/tmp']) {
+    assert.throws(() => resolveConfig({ stateDir: bad }), /absolute path|system or credential/, `${bad} must be refused`);
+  }
+  assert.doesNotThrow(() => resolveConfig({ stateDir: '' }), 'empty keeps records beside the project');
+  const resolved = resolveConfig({ stateDir: project() });
+  assert.ok(resolved.stateDir !== '', 'an ordinary directory is accepted');
 });

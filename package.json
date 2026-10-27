@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-harness-of-harness",
-  "version": "0.1.0",
+  "version": "0.1.0-preview.1",
   "description": "Harness-of-Harness mode for DeepSeek Harness: a selectable agent preset whose sessions run the Planner-Developer-Tester continual-development loop over one project, with repair-then-next iterations, receipt and reproducibility records, and a live Web panel.",
   "keywords": [
     "dsh",
