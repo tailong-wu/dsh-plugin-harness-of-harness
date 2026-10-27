@@ -7,7 +7,7 @@
  * HTTP surface are all exercised without a live harness or a credential.
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
@@ -37,7 +37,7 @@ after(() => {
  * Build a fake host that satisfies the engine's collaborators.
  * @param behavior - `ok`, `never`, or `planner-error`.
  */
-function makeHost(behavior = 'ok') {
+function makeHost(behavior = 'ok', unregisteredSessions = new Set()) {
   const delegations = [];
   const disposed = [];
   const parent = { id: 'session-parent' };
@@ -61,7 +61,7 @@ function makeHost(behavior = 'ok') {
 
   const subagents = {
     list: () => ['spawn'],
-    getProvider: () => ({ capabilities: { agentPreset: true } }),
+    getProvider: () => ({ capabilities: { agentPreset: true, outputSchema: true } }),
     startActivation: async (spec) => {
       // Enforce `maxDepth` the way the real service does: it caps the child's
       // ABSOLUTE depth, which is the parent's depth plus one. A delegating host
@@ -92,7 +92,18 @@ function makeHost(behavior = 'ok') {
           finish({ output: [{ type: 'text', text: 'the planner gave up' }], stopReason: 'error' });
         } else {
           writeArtifact(spec.label, spec.request.prompt[0].text);
-          finish({ output: [{ type: 'text', text: `completed ${childId}` }], stopReason: 'completed' });
+          // The QA Tester answers with a structured verdict, as the real role
+          // does. A tester that submits none is treated as NOT accepted, so a
+          // fake host that omitted this would make every iteration `partial` —
+          // correct engine behaviour, not a fixture detail to paper over.
+          const structured = /QA Tester/.test(spec.label)
+            ? { passed: true, verified: [{ claim: 'it runs', evidence: 'ran it' }], gaps: [] }
+            : undefined;
+          finish({
+            output: [{ type: 'text', text: `completed ${childId}` }],
+            stopReason: 'completed',
+            ...(structured === undefined ? {} : { structured }),
+          });
         }
       }
       return {
@@ -107,7 +118,10 @@ function makeHost(behavior = 'ok') {
   };
 
   const agents = {
-    get: (id) => (id === 'session-parent' ? parent : undefined),
+    // Any named session resolves to this parent, so a test can use several
+    // session ids without modelling the whole registry. A dedicated test below
+    // creates a host with a closed registry to check the missing-session path.
+    get: (id) => (unregisteredSessions.has(id) ? undefined : parent),
     roots: () => [parent],
   };
 
@@ -115,8 +129,8 @@ function makeHost(behavior = 'ok') {
 }
 
 /** Build an engine over a fake host. */
-function makeEngine({ projectDir, behavior = 'ok', overrides = {} } = {}) {
-  const host = makeHost(behavior);
+function makeEngine({ projectDir, behavior = 'ok', overrides = {}, unregisteredSessions = new Set() } = {}) {
+  const host = makeHost(behavior, unregisteredSessions);
   const config = {
     showPanel: true,
     stateDir: '',
@@ -161,7 +175,11 @@ test('one iteration delegates the three roles in order and records every artifac
   for (const spec of host.delegations) {
     assert.equal(spec.provider, 'spawn');
     assert.equal(spec.delivery, 'caller', 'a role must not post a completion notice into the conversation');
-    assert.equal(spec.request.cwd, projectDir);
+    // The engine hands the role the REAL path it validated, not the string the
+    // caller typed: on macOS `/var/folders/...` is a symlink to
+    // `/private/var/folders/...`, and a cwd that differs from the checked path
+    // would mean the guard did not apply to what actually got used.
+    assert.equal(spec.request.cwd, realpathSync(projectDir));
     assert.equal(spec.request.parent, host.delegations[0].request.parent);
     // `childMaxDepth: 0` grants a role no further delegation, which is an
     // ABSOLUTE cap of 1: the role itself. Passing 0 through verbatim is the bug
@@ -337,6 +355,98 @@ test('input validation refuses an empty goal, a bad budget, and a concurrent run
 });
 
 /**
+ * The run writes `.hoh/` beside the artifact and points three children at the
+ * directory, so a system root or a relative path must be refused rather than
+ * silently accepted. The host file policy still governs what a role may touch;
+ * this only stops the loop from aiming at a root by accident or by request.
+ */
+test('a project directory must be an absolute, non-root path', async () => {
+  const projectDir = project();
+  const { engine } = makeEngine({ projectDir, behavior: 'never' });
+
+  assert.throws(() => engine.start({ sessionId: 'd', goal: 'x', iterations: 1, projectDir: 'relative/dir' }), /absolute path/);
+  for (const root of ['/', '/etc', '/usr', '/tmp', '/etc/..']) {
+    assert.throws(
+      () => engine.start({ sessionId: 'd', goal: 'x', iterations: 1, projectDir: root }),
+      /Refusing to run a loop over/,
+      `${root} must be refused`,
+    );
+  }
+  // A real project directory is still accepted.
+  const ok = engine.start({ sessionId: 'd', goal: 'x', iterations: 1, projectDir });
+  engine.stop({ sessionId: 'd' });
+  await settled(ok);
+
+  // Deeper system trees are refused too: an exact-match denylist would let
+  // these through, and they are the ones that matter.
+  for (const narrow of ['/etc/ssl', '/usr/local', '/var/db']) {
+    assert.throws(
+      () => engine.start({ sessionId: 'd', goal: 'x', iterations: 1, projectDir: narrow }),
+      /Refusing to run a loop over/,
+      `${narrow} must be refused`,
+    );
+  }
+
+  engine.dispose();
+});
+
+/**
+ * `resolve()` is lexical, so it cannot see a symlink: `/tmp/proj` pointing at
+ * `/etc` resolves to the innocent-looking `/tmp/proj` and would be accepted while
+ * every write went to `/etc`. macOS makes this the ordinary case, because `/tmp`
+ * is itself a symlink. The guard must run on the real path.
+ */
+test('a symlinked project directory cannot escape into a refused tree', async () => {
+  const { symlinkSync } = await import('node:fs');
+  const parent = project();
+  const link = join(parent, 'sneaky-link');
+  // A link whose target is a refused tree. The link path itself looks harmless.
+  symlinkSync('/etc', link, 'dir');
+  const { engine } = makeEngine({ projectDir: parent, behavior: 'never' });
+
+  assert.throws(
+    () => engine.start({ sessionId: 'sym', goal: 'x', iterations: 1, projectDir: link }),
+    /Refusing to run a loop over/,
+    'a symlink into /etc must be resolved and refused',
+  );
+  engine.dispose();
+});
+
+/**
+ * A directory that does not exist is refused with a clear message rather than
+ * failing later inside the first role.
+ */
+test('a missing project directory is refused up front', async () => {
+  const parent = project();
+  const { engine } = makeEngine({ projectDir: parent, behavior: 'never' });
+  assert.throws(
+    () => engine.start({ sessionId: 'missing', goal: 'x', iterations: 1, projectDir: join(parent, 'nope', 'deeper') }),
+    /does not exist/,
+  );
+  engine.dispose();
+});
+
+/**
+ * A non-integer budget is a caller mistake, not a request for the default.
+ * Coercing `3.5` or `"3"` into `defaultIterations` would run a different number
+ * of iterations than the caller asked for.
+ */
+test('a non-integer iteration budget is refused, not replaced by the default', async () => {
+  const projectDir = project();
+  const { engine } = makeEngine({ projectDir, behavior: 'never' });
+
+  for (const bad of [3.5, '3', null, Number.NaN]) {
+    assert.throws(
+      () => engine.start({ sessionId: 'n', goal: 'x', iterations: bad }),
+      /whole number from 1/,
+      `${String(bad)} must be refused`,
+    );
+  }
+
+  engine.dispose();
+});
+
+/**
  * Build a fake `connection` service that collects the panel's routes.
  */
 function makePanelHost() {
@@ -445,5 +555,35 @@ test('a panel disabled by configuration still registers its routes, and reports 
   const config = await (await dispatch(panel.routes, 'GET', '/api/plugins/hoh-harness-of-harness/config')).json();
   assert.equal(config.enabled, false);
 
+  engine.dispose();
+});
+/**
+ * A named session must be live. Falling back to "some root session" would parent
+ * a caller's run to a different conversation: the roles would surface in another
+ * session's subagent list, and that session's `hoh_status` would report a run it
+ * never started.
+ */
+test('a named session that is not live is refused instead of reusing a root session', async () => {
+  const projectDir = project();
+  const { engine } = makeEngine({ projectDir, behavior: 'never', unregisteredSessions: new Set(['gone']) });
+
+  assert.throws(
+    () => engine.start({ sessionId: 'gone', goal: 'x', iterations: 1 }),
+    /is not live on this host/,
+  );
+  assert.equal(engine.read('gone'), null, 'a refused start must not leave a run behind');
+  engine.dispose();
+});
+
+/**
+ * The tool path names no session, so the root fallback still applies there.
+ */
+test('an unnamed session still falls back to the root session', async () => {
+  const projectDir = project();
+  const { engine } = makeEngine({ projectDir });
+  const state = engine.start({ goal: 'no session', iterations: 1 });
+  assert.equal(state.status, 'running');
+  engine.stop({});
+  await settled(state);
   engine.dispose();
 });

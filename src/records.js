@@ -51,7 +51,14 @@ export function writeReceipt(runDir, input) {
       role,
       preset: binding.preset ?? null,
       workspace_access: binding.workspaceAccess,
-      max_depth: binding.maxDepth,
+      // Upstream has no `max_depth` field at all. This plugin records both
+      // numbers because they differ and the difference is the point:
+      // `max_depth_grant` is the extra delegation the configuration allows,
+      // while `max_depth_effective` is the ABSOLUTE cap actually put on the
+      // activation, which is what a reader means by "depth limit". Keeping only
+      // the grant under a bare `max_depth` read as the cap, and was wrong.
+      max_depth_grant: binding.maxDepth,
+      max_depth_effective: binding.maxDepthEffective ?? null,
       harness: 'deepseek-harness',
       model: null,
       reasoning_effort: null,
@@ -119,7 +126,8 @@ export function buildReproducibility(input) {
     roles[role] = {
       preset: binding.preset,
       workspace_access: binding.workspaceAccess,
-      max_depth: binding.maxDepth,
+      max_depth_grant: binding.maxDepth,
+      max_depth_effective: binding.maxDepthEffective ?? null,
       harness: 'deepseek-harness',
       model: null,
       reasoning_effort: null,

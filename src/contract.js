@@ -133,7 +133,7 @@ export const EVIDENCE_SCHEMA = {
     passed: {
       type: 'boolean',
       description:
-        'True when every requirement this iteration set out to satisfy is verified. Independent of `gaps`: a pass may still record polish observations, and the Developer is sent back only when `passed` is false.',
+        'True when every requirement this iteration set out to satisfy is verified. A pass may still record polish observations in `gaps`. Report a `blocker` gap instead of setting this to false when the artifact itself is wrong: the loop treats a `blocker` as a failed pass either way.',
     },
     verified: {
       type: 'array',
@@ -161,7 +161,8 @@ export const EVIDENCE_SCHEMA = {
           severity: {
             type: 'string',
             enum: ['blocker', 'high', 'medium', 'low'],
-            description: 'How much the gap costs. `blocker` and `high` mark work a repair pass must close.',
+            description:
+              'How much the gap costs. Only `blocker` sends the Developer back for a repair pass inside this iteration; `high` is the next iteration\'s first priority, `medium` and `low` are polish. Use `blocker` only for something that makes the iteration\'s stated goal unverifiable.',
           },
         },
       },

@@ -3,6 +3,8 @@
  * @module dsh-plugin-harness-of-harness/config
  */
 
+import { isAbsolute } from 'node:path';
+
 import z from '@deepseek-ai/schemastery';
 
 import {
@@ -83,6 +85,14 @@ export function resolveConfig(config = {}) {
   const stateDir = (config.stateDir ?? '').trim();
   if (stateDir.length > MAX_DIRECTORY_CHARS) {
     throw new Error(`stateDir is longer than ${MAX_DIRECTORY_CHARS} characters.`);
+  }
+  // `stateDir` is the other place a run writes, and it comes from profile YAML
+  // rather than from a request — but pointing it at a system tree would put run
+  // records somewhere no project belongs, so the same containment applies. A
+  // relative value is refused too: it would resolve against whatever the host's
+  // working directory happens to be.
+  if (stateDir !== '' && !isAbsolute(stateDir)) {
+    throw new Error(`stateDir must be an absolute path when set (received "${stateDir}").`);
   }
 
   const testerPolicy = config.testerPolicy ?? 'repair-then-next';

@@ -22,12 +22,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import {
   BLOCKING_SEVERITIES,
   EVIDENCE_SCHEMA,
+  MAX_DIRECTORY_CHARS,
   MAX_GOAL_CHARS,
   MAX_ITERATIONS,
   MAX_LOG_ENTRIES,
@@ -115,6 +117,123 @@ function keyFor(sessionId) {
 }
 
 /**
+ * System prefixes a run must never treat as a project directory.
+ *
+ * The loop writes `.hoh/` beside the artifact and hands the directory to three
+ * delegating children, so a system tree would scatter run records through the
+ * filesystem and point a Developer at files no loop should touch.
+ *
+ * Checked as *prefixes of the real path*, not as exact strings: an exact-match
+ * denylist lets `/etc/ssl`, `/Users/<you>/.ssh`, and `/var/db` straight through,
+ * which are exactly the directories that matter. Prefix matching cannot have
+ * that gap.
+ *
+ * This is a guard against accidents and against a panel request naming a system
+ * tree — not a sandbox. The host's file policy remains the authority on what a
+ * role may read or write.
+ */
+const REFUSED_PREFIXES = [
+  '/bin',
+  '/boot',
+  '/dev',
+  '/etc',
+  '/lib',
+  '/lib64',
+  '/proc',
+  '/root',
+  '/sbin',
+  '/sys',
+  '/usr',
+  '/var/db',
+  '/var/log',
+  '/System',
+  '/Library',
+  '/Applications',
+  '/private/etc',
+  '/private/tmp',
+  '/private/var/db',
+];
+
+/**
+ * Bare temporary roots refused as *whole* directories only.
+ *
+ * A scratch tree directly under one of these is a legitimate throwaway project,
+ * which the test suite itself relies on, so these are matched by equality rather
+ * than by prefix.
+ */
+const REFUSED_EXACT = ['/tmp', '/private/tmp', '/private/var/tmp', '/var/tmp'];
+
+/** The real path of the current user's home, or `null` when it cannot be resolved. */
+function homeRealPath() {
+  try {
+    return realpathSync(homedir());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a real path is a system tree this loop refuses to run over.
+ *
+ * Also refuses the home directory itself and any dotfile directory directly
+ * inside it (`~/.ssh`, `~/.aws`, `~/.gnupg`): those are credential stores, never
+ * a place to put a project. An ordinary project *under* home — `~/code/thing` —
+ * is fine, which is the common case and must not be broken by this guard.
+ * @param real - the resolved real path.
+ * @returns whether the path is refused.
+ */
+function isRefusedProjectPath(real) {
+  if (real === '/') return true;
+  if (REFUSED_EXACT.includes(real)) return true;
+  for (const prefix of REFUSED_PREFIXES) {
+    if (real === prefix || real.startsWith(`${prefix}/`)) return true;
+  }
+  const home = homeRealPath();
+  if (home !== null) {
+    if (real === home) return true;
+    if (real.startsWith(`${home}/.`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Validate and normalize the project directory a run will develop in.
+ *
+ * The directory is the one place a run writes outside its own state directory,
+ * so it must be absolute, must exist, and must not resolve into a system tree.
+ *
+ * `resolve()` alone is **not** containment: it is purely lexical, so a symlink
+ * at `/tmp/proj` pointing at `/etc` resolves to the innocent-looking
+ * `/tmp/proj`. On macOS `/tmp` is itself a symlink to `/private/tmp`, so this is
+ * the ordinary case rather than an exotic one. The check therefore runs on
+ * `realpathSync()`, and the real path is what the run uses from then on — the
+ * recorded `projectDir`, the `.hoh/` location, and the roles' `cwd` must all be
+ * the path that was actually validated.
+ * @param value - the requested directory, or the fallback when empty.
+ * @returns the real absolute directory.
+ * @throws when the value is empty, relative, missing, or resolves into a refused tree.
+ */
+function resolveProjectDir(value) {
+  if (value === '') throw new Error('No project directory: name one in the panel.');
+  if (!isAbsolute(value)) {
+    throw new Error(`The project directory must be an absolute path (received "${value}").`);
+  }
+  // `resolve` collapses `.`/`..` and redundant separators before the filesystem
+  // is asked anything, so `/etc/..` cannot dodge the realpath below.
+  const lexical = resolve(value);
+  let real;
+  try {
+    real = realpathSync(lexical);
+  } catch {
+    throw new Error(`The project directory does not exist: ${lexical}. Create it first.`);
+  }
+  if (isRefusedProjectPath(real)) {
+    throw new Error(`Refusing to run a loop over ${real}: choose a project directory, not a system or credential tree.`);
+  }
+  return real;
+}
+
+/**
  * Make a new run id: sortable by time and unique within a second.
  * @returns the run id.
  */
@@ -188,7 +307,10 @@ function verdictOf(result) {
   const verified = Array.isArray(structured.verified) ? structured.verified : [];
   const gaps = Array.isArray(structured.gaps) ? structured.gaps : [];
   return {
-    passed: structured.passed !== false,
+    // Strictly `true`, never merely "not false". The schema makes `passed`
+    // required, so an absent flag means the submission did not honour the
+    // contract — and a verifier's silence must not read as a pass.
+    passed: structured.passed === true,
     verified,
     gaps: gaps.map((gap) => ({
       gap: typeof gap?.gap === 'string' ? gap.gap : String(gap),
@@ -205,13 +327,20 @@ function verdictOf(result) {
  * `blocker` gaps. Acceptance therefore requires the flag *and* the absence of a
  * blocking gap, so one helper — not the flag alone — decides repair, iteration
  * completeness, and what the receipt reports.
- * @param verdict - the parsed verdict, or `null`.
- * @returns `{ accepted, blocking }`.
+ *
+ * A missing verdict is **not** an acceptance. Upstream's
+ * `tester_acceptance_passed` (`core/../adapters/gamecraft_bench/runner.py:418`)
+ * returns false for anything that is not a dict and true only for an explicit
+ * pass, so a verifier that says nothing fails closed. Treating "no verdict" as a
+ * pass would let a Tester whose structured submission was rejected, or that
+ * answered in prose, close its iteration as verified.
+ * @param verdict - the parsed verdict, or `null` when the child submitted none.
+ * @returns `{ accepted, blocking, missing }`.
  */
 function acceptanceOf(verdict) {
-  if (verdict === null) return { accepted: true, blocking: [] };
+  if (verdict === null) return { accepted: false, blocking: [], missing: true };
   const blocking = verdict.gaps.filter((gap) => BLOCKING_SEVERITIES.includes(gap.severity));
-  return { accepted: verdict.passed && blocking.length === 0, blocking };
+  return { accepted: verdict.passed && blocking.length === 0, blocking, missing: false };
 }
 
 /**
@@ -245,16 +374,27 @@ function pickProvider(subagents) {
 }
 
 /**
- * Resolve the Agent the roles are delegated under: the panel's own session
- * when it is live, otherwise a single root session.
+ * Resolve the Agent the roles are delegated under.
+ *
+ * A named session must be live. Falling back to "some root session" when it is
+ * not would silently parent a caller's run to a different conversation — the
+ * roles would appear in someone else's subagent list, and `hoh_status` for the
+ * named session would report a run it never started. A caller that named no
+ * session at all (the CLI and tool paths) still gets the root fallback.
  * @param ctx - the scoped host context.
- * @param sessionId - the session the panel named, when it named one.
- * @returns the parent Agent, or `undefined` when no session is live.
+ * @param sessionId - the session the caller named, when it named one.
+ * @returns the parent Agent, or `undefined` for an unnamed session when no root exists.
+ * @throws when a named session is not live.
  */
 function resolveParent(ctx, sessionId) {
   if (sessionId !== undefined && sessionId !== null && sessionId !== '') {
     const agent = ctx.agents.get(sessionId);
-    if (agent !== undefined) return agent;
+    if (agent === undefined) {
+      throw new Error(
+        `Session ${sessionId} is not live on this host, so a loop cannot be parented to it. Open that session and try again.`,
+      );
+    }
+    return agent;
   }
   const roots = ctx.agents.roots();
   return roots.length > 0 ? roots[roots.length - 1] : undefined;
@@ -276,19 +416,27 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
   /**
    * The role bindings of one run, shaped like the upstream `RoleBinding`.
    *
-   * `maxDepth` here is the GRANT recorded in the audit records — the extra
-   * levels a role may itself delegate — not the absolute cap put on the
-   * activation request. {@link absoluteRoleMaxDepth} derives that cap from this
-   * grant at delegation time.
+   * Two depth numbers are kept because they are genuinely different and the
+   * audit records are misleading if only one is written:
+   *
+   * - `maxDepth` is the GRANT — the extra levels a role may itself delegate.
+   * - `maxDepthEffective` is the ABSOLUTE cap the subagent service enforces,
+   *   which is the parent's depth plus one plus the grant.
+   *
+   * {@link absoluteRoleMaxDepth} derives the cap at delegation time; passing the
+   * parent in here keeps the recorded cap identical to the enforced one.
+   * @param parent - the session agent the roles are delegated from, when known.
    * @returns one binding per role.
    */
-  function roleBindings() {
+  function roleBindings(parent) {
+    const effective = absoluteRoleMaxDepth(config.childMaxDepth, parent);
     const bindings = {};
     for (const role of ROLES) {
       bindings[role] = {
         preset: config.enforceRolePresets ? ROLE_PRESETS[role] ?? null : null,
         workspaceAccess: role === 'developer' ? 'read-write' : 'read-only',
         maxDepth: config.childMaxDepth,
+        maxDepthEffective: effective,
       };
     }
     return bindings;
@@ -481,14 +629,18 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
       maxDepth: absoluteRoleMaxDepth(config.childMaxDepth, parent),
     };
     const rolePreset = ROLE_PRESETS[role] ?? null;
-    if (
-      config.enforceRolePresets &&
-      rolePreset !== null &&
-      ctx.subagents.getProvider(provider)?.capabilities?.agentPreset === true
-    ) {
+    const capabilities = ctx.subagents.getProvider(provider)?.capabilities ?? {};
+    if (config.enforceRolePresets && rolePreset !== null && capabilities.agentPreset === true) {
       request.agentPreset = rolePreset;
     }
-    if (role === 'tester') request.outputSchema = EVIDENCE_SCHEMA;
+    // The structured verdict is what the loop acts on, so it is only requested
+    // from a provider that advertises schema support. A provider without it
+    // would reject the activation at start, so asking anyway turns a clear
+    // capability mismatch into an opaque child failure. The Tester then reports
+    // prose and submits no verdict — which `acceptanceOf` treats as NOT
+    // accepted, so the omission surfaces as an unaccepted iteration rather than
+    // a silent pass.
+    if (role === 'tester' && capabilities.outputSchema === true) request.outputSchema = EVIDENCE_SCHEMA;
 
     return ctx.subagents.startActivation({
       provider,
@@ -724,9 +876,11 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
 
         iteration.endedAt = Date.now();
         // A repair supersedes the verdict that triggered it, so the iteration's
-        // acceptance is the last QA verdict's, not every verdict on the way.
+        // acceptance is the last QA verdict's, not every verdict on the way. An
+        // iteration with no tester verdict at all is never accepted: a missing
+        // verdict is the absence of evidence, not evidence of a pass.
         const lastTester = iteration.phases.filter((phase) => phase.role === 'tester').at(-1);
-        const accepted = lastTester === undefined || lastTester.verdict === null || acceptanceOf(lastTester.verdict).accepted;
+        const accepted = lastTester !== undefined && acceptanceOf(lastTester.verdict).accepted;
         const complete = iteration.phases.every((phase) => phase.status === 'done') && accepted;
         iteration.status = complete ? 'done' : controller.signal.aborted ? 'stopped' : 'partial';
         try {
@@ -782,11 +936,17 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         throw new Error(`The requirements text is longer than ${MAX_GOAL_CHARS} characters.`);
       }
 
-      const projectDir = (typeof request.projectDir === 'string' ? request.projectDir.trim() : '') || fallbackProjectDirectory();
-      if (projectDir === '') throw new Error('No project directory: name one in the panel.');
+      const requestedDir = typeof request.projectDir === 'string' ? request.projectDir.trim() : '';
+      if (requestedDir.length > MAX_DIRECTORY_CHARS) {
+        throw new Error(`The project directory is longer than ${MAX_DIRECTORY_CHARS} characters.`);
+      }
+      const projectDir = resolveProjectDir(requestedDir || fallbackProjectDirectory());
 
-      const iterations = Number.isInteger(request.iterations) ? request.iterations : config.defaultIterations;
-      if (iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
+      // A non-integer budget is a caller mistake, not a request to use the
+      // default: accepting `3.5` or `"3"` silently would run a different number
+      // of iterations than the caller asked for.
+      const iterations = request.iterations === undefined ? config.defaultIterations : request.iterations;
+      if (!Number.isInteger(iterations) || iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
         throw new Error(`The iteration budget must be a whole number from ${MIN_ITERATIONS} to ${MAX_ITERATIONS}.`);
       }
 
@@ -798,7 +958,9 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
         throw new Error(`Run records already exist in ${runDir}; start a new run instead of reusing a run id.`);
       }
 
-      const bindings = roleBindings();
+      // The same parent the roles are delegated from, so the recorded depth cap
+      // is the one that will actually be enforced on their activations.
+      const bindings = roleBindings(resolveParent(ctx, key === '__default__' ? undefined : key));
       const startedAt = Date.now();
       const record = {
         state: {

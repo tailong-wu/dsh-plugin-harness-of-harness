@@ -27,6 +27,36 @@ drives it:
 Either way the panel follows the run, and either way the three roles are
 delegated as fresh DSH subagents of that session.
 
+## Installing
+
+This is a preview release. Install it into a DSH profile by Git URL:
+
+```sh
+dsh plugin --profile web add github:tailong-wu/dsh-plugin-harness-of-harness
+```
+
+Then restart the profile so the new plugin loads:
+
+```sh
+dsh web
+```
+
+The package ships a `dsh.bundle.patch`, so installing it adds both the
+**Harness of Harness** preset and the panel — no further configuration is
+needed. If your profile has no `pnpm` on `PATH`, `dsh plugin` reports that
+before it changes anything.
+
+To try it without touching your working profile, use a throwaway one:
+
+```sh
+dsh plugin --profile hoh-preview add github:tailong-wu/dsh-plugin-harness-of-harness
+dsh --profile hoh-preview web
+```
+
+Requires DSH `0.2.1-rc.2` (declared in `dsh.compatibility.dshReleases`) and
+Node `22.5.0` or newer. An install from Git builds the Web client during
+`prepare`, so the first install takes a little longer than an npm one.
+
 ## Selecting HoH mode
 
 Pick **Harness of Harness** in the session's preset picker (the `agent-preset`
@@ -150,16 +180,30 @@ capability set.
 ## Requirements and limits
 
 - A run is parented to the session that started it, so that session must be
-  live. Without it the Host falls back to a single root session.
+  live. Naming a session that is not live is refused rather than quietly reusing
+  another one; only a caller that names no session at all (the `hoh_start` tool)
+  falls back to a single root session.
+- The panel is a single-owner surface. The Host admits a caller as the local
+  `owner` and does not expose a per-session identity to a route, so any
+  owner-privileged client can start, stop, or read a run for a session id it
+  knows. That is the Host's trust model for a local app, not a check this plugin
+  can add; the routes carry no secrets and return only run state and file paths.
+- The project directory must be absolute and must exist, and is refused if it
+  resolves into a system tree (`/etc`, `/usr`, `/var/db`, …) or a dotfile
+  directory under your home (`~/.ssh`, `~/.aws`). Symlinks are followed before
+  that check, so a link cannot smuggle one of those in. This is a guard against
+  accidents, not a sandbox: the Host's file policy still governs what a role may
+  actually read or write.
 - Every role inherits the session's model and permission roots. The read-only
   roles are delegated under a preset whose file tool cannot write, but the shell
   rows remain (the QA Tester has to build and run the project), and a shell can
-  write. Upstream closes that with a read-only copy of the workspace, which this
-  host does not offer a plugin — see
+  write. Upstream closes that by giving each read-only role its own isolated
+  workspace and hash-checking the candidate, which this host does not offer a
+  plugin — see
   [`docs/alignment-with-upstream-hoh.md`](docs/alignment-with-upstream-hoh.md).
 - How this plugin relates to upstream HoH — what is aligned, where it improves
-  on upstream, and where it is weaker or deliberately out of scope — is recorded
-  item by item in
+  on upstream, which defects review found and closed, and what is deliberately
+  out of scope — is recorded item by item in
   [`docs/alignment-with-upstream-hoh.md`](docs/alignment-with-upstream-hoh.md).
 - The HoH preset's plugin list intentionally tracks the shipped `standard`
   preset of DSH 0.2.1-rc.2, minus the isolated plan-mode group (HoH plans
@@ -182,7 +226,7 @@ npm run smoke          # imports the Host half and parses the preset patch in No
 npm test               # drives the real engine, panel routes, service, and tools over stand-ins
 ```
 
-Four modules make up the Host side:
+The Host side is these modules:
 
 | Module | Role |
 |---|---|
@@ -190,6 +234,10 @@ Four modules make up the Host side:
 | [`src/engine.js`](src/engine.js) | the loop: iterations, delegation, repair rounds, cancellation |
 | [`src/transitions.js`](src/transitions.js) | the deterministic role machine: which role may follow which |
 | [`src/records.js`](src/records.js) | `runtime_receipt.json`, `reproducibility.json`, and their fingerprints |
+| [`src/config.js`](src/config.js) | the profile configuration schema and its resolution into runtime settings |
+| [`src/contract.js`](src/contract.js) | constants shared by both halves: routes, roles, limits, and the evidence schema |
+| [`src/prompts.js`](src/prompts.js) | the Planner, Developer, repair, and QA Tester prompts |
+| [`src/panel.js`](src/panel.js) | the panel's HTTP routes |
 | [`src/service.js`](src/service.js) | the `hohHarnessOfHarness` service and the model-facing run projection |
 | [`tools.js`](tools.js) | the preset-scoped row: `hoh_start`, `hoh_status`, `hoh_stop` |
 

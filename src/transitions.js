@@ -73,14 +73,20 @@ export function createRoleMachine() {
       const previous = current.length === 0 ? undefined : current[current.length - 1].role;
       if (!allowedAfter(previous).includes(role)) reject(previous, role, active);
 
-      const startedAt = Date.now();
+      const recordedAt = Date.now();
+      // Upstream's `invoke` captures `started_wall` BEFORE running the role
+      // (core/runtime.py:89) and appends the event afterwards, so `started_at`
+      // is a real start and `duration_seconds` is the time that elapsed from it.
+      // Recording `Date.now()` here would stamp the event with the moment the
+      // turn ENDED, which reads as a start to anything consuming the receipt.
+      const startedAt = details.startedAt ?? recordedAt;
       const event = {
         iteration_index: active,
         sequence: events.length + 1,
         role,
         status: details.status ?? 'completed',
         started_at: new Date(startedAt).toISOString(),
-        duration_seconds: Math.max(0, (details.endedAt ?? startedAt) - (details.startedAt ?? startedAt)) / 1000,
+        duration_seconds: Math.max(0, (details.endedAt ?? recordedAt) - startedAt) / 1000,
         details: details.details ?? {},
       };
       events.push({ ...event, role, iteration_index: active });

@@ -1,29 +1,31 @@
-# Upstream HoH: what is aligned, what is improved, what is weaker
+# Upstream HoH: what is aligned, what is improved, what was wrong and is now fixed
 
 This plugin is a **DSH-native port of the Harness-of-Harness core loop**, not a
 re-implementation of the paper's benchmark machinery. So the useful question is
-not "is this HoH?" but three separate questions:
+not "is this HoH?" but four separate questions:
 
 1. which upstream mechanisms are **reproduced faithfully** here,
-2. where does this plugin **do better** than upstream, and
-3. where is it **weaker** or deliberately **out of scope**.
+2. where does this plugin **do better** than upstream,
+3. which defects review found and how they were closed, and
+4. what is deliberately **out of scope**.
 
-This document answers all three, item by item, and records the code, the tests,
+This document answers all four, item by item, and records the code, the tests,
 and the run artifacts that back each claim.
 
 Upstream is [`hoh-lite`](https://github.com/Flesymeb/HarnessOfHarness), the
 `gameloop` Python CLI, at commit `6a02101`. Line numbers refer to
 `src/gameloop/…` in that tree.
 
-**Read Part III before quoting Part I.** An aligned mechanism and a weaker one
-can sit one line apart: the read-only role is aligned at the tool level and
-weaker at the workspace level, in the same feature.
+**Read Part III before quoting Part I.** An aligned mechanism and a defect can
+sit one line apart: the read-only role is aligned at the tool level and weaker at
+the workspace level, in the same feature. Part III records the eight defects found
+in review, and the test that now pins each fix.
 
 ---
 
 ## At a glance
 
-| ID | Mechanism | Relationship to upstream |
+| ID | Mechanism | Status |
 |---|---|---|
 | **A-1** | Deterministic role sequencing | **aligned** |
 | **A-2** | `runtime_receipt.json`, rewritten per role event | **aligned** in shape, **extended** with fields |
@@ -37,11 +39,14 @@ weaker at the workspace level, in the same feature.
 | **O-4** | Repair carried by the structured gap list | **improves on** upstream's bare re-run |
 | **O-5** | Session-native, live, interruptible | **improves on** upstream's batch CLI |
 | **O-6** | Zero external runtime | **improves on** upstream's deployment |
-| **W-1** | A missing QA verdict counts as acceptance | **weaker** — upstream fails closed |
-| **W-2** | A verdict missing its `passed` field counts as a pass | **weaker** |
-| **W-3** | `max_depth` records the grant, not the cap in force | **weaker** — and misnamed |
-| **W-4** | `high` severity is documented as blocking but is not | **defect** — schema and code disagree |
-| **W-5** | Receipt `started_at` is the *completion* time | **wrong** — upstream records the start |
+| **W-1** | A missing QA verdict counted as acceptance | **was weaker — fixed** (now fails closed) |
+| **W-2** | A verdict missing its `passed` field counted as a pass | **was weaker — fixed** |
+| **W-3** | `max_depth` recorded the grant, not the cap in force | **was wrong — now records both** |
+| **W-4** | `high` severity documented as blocking but not enforced | **was a defect — schema now matches code** |
+| **W-5** | Receipt `started_at` was the *completion* time | **was wrong — now records the start** |
+| **W-6** | A project directory was accepted on trust | **was a hole — fixed** (realpath + prefix guard) |
+| **W-7** | A dead session silently reused another | **was wrong — fixed** (refused) |
+| **W-8** | Non-integer budget, unescaped fence, unbounded body | **were defects — fixed** |
 | **U-1 … U-11** | Benchmark machinery, integrity, policy, atomicity | **deliberately out of scope** |
 
 ---
@@ -90,7 +95,7 @@ directory that already holds a receipt is refused at construction
 `schema_version`, `runtime`, `coordination: deterministic-host`,
 `active_iteration`, `tester_policy`, `max_inner_repairs`, `roles`, and `events`,
 rewritten after every role turn and at run end. `engine.start` refuses a run
-directory that already holds a receipt or a `run.json` (`src/engine.js:797-799`).
+directory that already holds a receipt or a `run.json` (`src/engine.js:885-887`).
 
 **Where.** `src/records.js` (`writeReceipt`, `RECEIPT_FILE`); `persistReceipt` in
 `src/engine.js`.
@@ -105,21 +110,30 @@ two workspace-access values.
 | Upstream | Here | Note |
 |---|---|---|
 | `active_loop` | `active_iteration` | renamed, because "iteration" is this plugin's term |
-| role binding = `{role, harness, model, reasoning_effort, workspace_access, tools{godot_mcp, godot_docs}}` | `{role, preset, workspace_access, max_depth, harness, model, reasoning_effort}` | `role`/`harness`/`model`/`reasoning_effort`/`workspace_access` match upstream spelling; `preset` and `max_depth` are this plugin's own, and upstream has **no** `max_depth` field and no `tools{godot_mcp, godot_docs}` counterpart here |
+| role binding = `{role, harness, model, reasoning_effort, workspace_access, tools{godot_mcp, godot_docs}}` | `{role, preset, workspace_access, max_depth_grant, max_depth_effective, harness, model, reasoning_effort}` | `role`/`harness`/`model`/`reasoning_effort`/`workspace_access` match upstream spelling; the three additions are this plugin's own, and upstream has no depth fields and no `tools{godot_mcp, godot_docs}` counterpart here |
 | no tester policy fields | `tester_policy`, `max_inner_repairs` | extra fields; upstream keeps these in its config, not its receipt |
 
 So "serialized with upstream spellings" holds for `workspace_access` and for
-`role`/`harness`/`model`/`reasoning_effort`; `preset` and `max_depth` are
-additions, and `max_depth` in particular carries a non-obvious value (see
-**W-3**).
+`role`/`harness`/`model`/`reasoning_effort`; `preset` and the two depth fields
+are additions. The depth pair is split because the configured grant and the
+enforced cap are different numbers (see **W-3**).
 
 ## A-3 — Read-only roles cannot write (partial)
 
 **Upstream.** `RoleBinding.__post_init__` (`core/roles.py:39`) refuses to
 construct a non-Developer binding with a read-write workspace or read-write Godot
-MCP, and refuses a live MCP for the Planner. Read-only roles receive a
-**read-only copy** of the candidate workspace, so writing is impossible rather
-than merely forbidden.
+MCP, and refuses a live MCP for the Planner.
+
+The protection that follows is **copy isolation plus hashing**, not a read-only
+mount, and the distinction matters because it is easy to describe from the field
+name rather than from the code. The Planner gets its own empty workspace
+(`planner.py:192-195`), never the candidate. The QA Tester runs against a
+disposable copy inside bubblewrap — and that copy is writable by design, with
+`sandbox_mode="danger-full-access"`, so it may write reports there
+(`runner.py:1350-1354`). What makes that safe is that writes land in the copy
+while the authoritative candidate stays untouched, and the candidate is hashed
+before and after the role (`runner.py:1592,1696`) so a mutation that did reach it
+is caught.
 
 **Here.** A second agent preset, `hoh-readonly`, is declared in
 `cordis.patch.yml` (`preset-hoh-readonly`) and mounts a
@@ -141,10 +155,14 @@ mount the mode control tools.
 
 **Residual — the honest gap, in two halves:**
 
-1. **Prevention** is weaker. Upstream hands the role a read-only copy (and runs it
-   under `bwrap` with allow-listed env, `runner.py:645`). This host offers a plugin
-   no way to mount a child on a read-only workspace, so the shell rows stay — the
-   QA Tester has to build and run the project, and a shell can write.
+1. **Prevention** is weaker. Upstream gives each read-only role an isolated
+   workspace it can write inside without reaching the candidate — an empty one
+   for the Planner (`planner.py:192-195`), a disposable bubblewrap copy for the
+   Tester (`runner.py:1350-1354`) — while filtering the environment through
+   `VISUAL_TESTER_ENV_ALLOWLIST` (`runner.py:1210-1214`). This host offers a
+   plugin no way to give a child an isolated copy, so the roles run in the real
+   project and the shell rows stay: the QA Tester has to build and run the
+   project, and a shell can write.
 2. **Detection** is absent. Upstream does not rely on prevention alone: it hashes
    the candidate before and after the role and fails the attempt as
    `invalid_candidate_mutation` when the hash moved
@@ -200,7 +218,7 @@ submission, so the engine reads `result.structured` instead of parsing text.
 `acceptanceOf` derives the effective verdict; the receipt records `passed`
 (effective) and `reported_passed` (what the child claimed) separately. The
 severity set and the unknown-severity default to `high` both match upstream
-(`verdictOf` in `src/engine.js:185-198`). What does **not** match is which
+(`verdictOf` in `src/engine.js:243-260`). What does **not** match is which
 severities block acceptance: upstream reads a status field, while this plugin
 applies `BLOCKING_SEVERITIES` — see **W-4** for the schema/code conflict that
 follows from it.
@@ -273,7 +291,7 @@ has no rule that notices it.
 **Here.** The verdict is two-part (`passed` flag + `gaps` list) and reaches the
 engine as one object, so the two halves are compared directly. Real runs
 produced a contradiction of exactly this kind: `passed: true` alongside gap
-entries. `acceptanceOf(verdict)` (`src/engine.js:211`) therefore requires the flag
+entries. `acceptanceOf(verdict)` (`src/engine.js:279`) therefore requires the flag
 **and** the absence of a blocking gap, and it is the single decision behind
 repair, iteration completeness, and the receipt.
 
@@ -298,7 +316,7 @@ it verifies the guard and documents the conflict at the same time.
 people with behaviourally identical configurations disagree the moment their
 whitespace or key order differs, and a comment changes the hash.
 
-**Here.** `configHash` (`src/records.js:103`) hashes a canonical
+**Here.** `configHash` (`src/records.js:110`) hashes a canonical
 `JSON.stringify` of the resolved config plus the role bindings plus the preset id,
 so two runs that *behave* the same produce the same hash.
 
@@ -373,112 +391,189 @@ policies (**U-6**), no demo-id evidence matrix (**U-9**).
 
 ---
 
-# Part III — Where this plugin is weaker than upstream
+# Part III — Defects found in review, and how they were closed
 
-Every item here is a place where upstream is stricter, and where this plugin
-should either be fixed or stop being described as equivalent. They were found by
-reading the code against upstream, not by guessing.
+The first preview release went through a code review against upstream and against
+the host's own API contract. Eight defects were found. All eight are **fixed**,
+and each fix is pinned by a test, so this section is a record of what was wrong
+and what now guarantees it stays right — not a list of live gaps.
 
-## W-1 — A missing QA verdict counts as an acceptance
+Keeping the diagnosis here is deliberate: a fix without a record of the failure it
+prevents tends to get reverted by the next person who finds the old behaviour more
+convenient.
+
+## W-1 — A missing QA verdict counted as an acceptance (fixed)
 
 **Upstream.** `tester_acceptance_passed` (`runner.py:418`) returns `False` for
 anything that is not a dict, and returns `True` only for `review_status == "pass"`
 or the explicit `dry_run` / `skipped_no_trial` statuses. **Fail-closed.**
 
-**Here.** `acceptanceOf(null)` returns `{ accepted: true }`
-(`src/engine.js:212`), and the iteration's completeness check treats a null
-verdict as accepted:
+**Was.** `acceptanceOf(null)` returned `{ accepted: true }`, and the iteration's
+completeness check treated a null verdict as accepted. A Tester that submitted no
+structured result at all — a rejected submission, a crash late in its turn, a
+child that answered in prose — closed its iteration as accepted. The comment above
+`verdictOf` claimed the opposite of what the code did.
 
-```js
-const accepted = lastTester === undefined || lastTester.verdict === null
-  || acceptanceOf(lastTester.verdict).accepted;
-```
+**Now.** `acceptanceOf(null)` returns `{ accepted: false, blocking: [], missing:
+true }`, and iteration completeness reads
+`lastTester !== undefined && acceptanceOf(lastTester.verdict).accepted`. Silence
+is the absence of evidence, not evidence of a pass.
 
-**Fail-open.** A Tester that submits no structured result at all — a schema
-violation, a crash late in its turn, a child that answered in prose — closes its
-iteration as accepted. The comment above `verdictOf` says the opposite of what
-the code does:
+**Verified.** `tests/alignment.test.mjs`: *a QA Tester that submits no verdict does
+not accept the iteration* asserts the iteration ends `partial` and that the
+receipt carries no `passed` key for the silent turn.
 
-> anything unexpected is treated as "no verdict" rather than as a pass
+## W-2 — A verdict missing its `passed` field counted as a pass (fixed)
 
-**Fix.** Make `acceptanceOf(null)` return `{ accepted: false, blocking: [] }` and
-drop the `verdict === null` disjunct. Upstream's fail-closed behaviour is the
-correct one for a verifier.
+**Was.** `verdictOf` computed `passed: structured.passed !== false`, so an absent
+flag became a pass. The schema makes `passed` required, which should make that
+unreachable — but "should be unreachable" is not a guarantee, and a verifier's
+default must not be success.
 
-## W-2 — A verdict missing its `passed` field counts as a pass
+**Now.** `passed: structured.passed === true`. Only an explicit `true` accepts.
 
-**Here.** `verdictOf` computes `passed: structured.passed !== false`
-(`src/engine.js:191`). The schema lists `passed` as required, so this should be
-unreachable — but if a child round-trips a value that dodges schema validation, or
-the schema is relaxed, an absent flag silently becomes a pass.
+**Verified.** `tests/alignment.test.mjs`: *a verdict without a passed flag is not
+an acceptance*.
 
-**Fix.** `passed: structured.passed === true`. Same reasoning as W-1: a verifier
-should not default to success.
-
-## W-3 — `max_depth` records the grant, not the cap in force
+## W-3 — `max_depth` recorded the grant, not the cap in force (fixed)
 
 **Upstream.** Has no `max_depth` field at all: `RoleBinding.to_dict`
 (`core/roles.py:56-70`) emits `role`, `harness`, `model`, `reasoning_effort`,
 `workspace_access`, and `tools{godot_mcp, godot_docs}`.
 
-**Here.** `writeReceipt` (`src/records.js:54`) and `buildReproducibility`
-(`src/records.js:122`) both write `max_depth: binding.maxDepth`, and
-`roleBindings()` (`src/engine.js:291`) sets that to `config.childMaxDepth` — the
-**grant**, default `0`. The cap actually enforced on the activation is computed
-separately in `spawnRole` as `absoluteRoleMaxDepth(...) = parentDepth + 1 + extra`
-(`src/engine.js:102,481`), i.e. `1` by default.
+**Was.** `writeReceipt` and `buildReproducibility` both wrote
+`max_depth: binding.maxDepth`, which `roleBindings()` set to
+`config.childMaxDepth` — the **grant**, default `0`. The cap actually enforced on
+the activation is computed separately in `spawnRole` as
+`absoluteRoleMaxDepth(...) = parentDepth + 1 + extra`, i.e. `1` by default. So the
+receipt showed `max_depth: 0` for a run whose roles really ran under a cap of `1`:
+two correct numbers, one misleading field name.
 
-So the receipt shows `max_depth: 0` for a run whose roles really ran under a cap
-of `1`. Both numbers are individually correct and mean different things, and the
-field name says neither.
+**Now.** Both are recorded, under names that say which is which:
+
+```json
+"max_depth_grant": 0,
+"max_depth_effective": 1,
+```
+
+`roleBindings(parent)` takes the same parent the roles are delegated from, so the
+recorded cap is by construction the one enforced on their activations. The host's
+own type documentation confirms the semantics: `maxDepth` "caps the child's
+absolute delegation depth ... its computed depth must be less than or equal to
+this non-negative safe integer" (`@deepseek-ai/dsh-subagent`,
+`lib/types/types.d.ts`).
 
 **Verified.** `tests/engine.test.mjs` *the configured recursion budget becomes the
 ABSOLUTE depth cap a role is started with* asserts `request.maxDepth === 1` at the
-default budget and `3` at `childMaxDepth: 2`. All four recorded runs in
-`demo-proj/.hoh/runs/` show `max_depth: 0` for every role.
+default budget and `3` at `childMaxDepth: 2`.
 
-**Fix.** Record the effective cap (or both, as `max_depth_grant` and
-`max_depth_effective`), and stop describing this field as an upstream spelling.
+## W-4 — `high` severity was documented as blocking but was not (fixed)
 
-## W-4 — `high` severity is documented as blocking but is not
+**Was.** `EVIDENCE_SCHEMA`'s severity description told the child that "`blocker`
+and `high` mark work a repair pass must close", while
+`BLOCKING_SEVERITIES = ['blocker']` fired repair on blockers only. The child was
+instructed to treat `high` as blocking, the loop did not, and a test pinned the
+discrepancy in place.
 
-**Here.** `EVIDENCE_SCHEMA`'s severity description (`src/contract.js:164`) tells
-the child:
+**Now.** The behaviour is unchanged — only `blocker` sends the Developer back —
+and the schema says so:
 
-> `blocker` and `high` mark work a repair pass must close.
+> Only `blocker` sends the Developer back for a repair pass inside this iteration;
+> `high` is the next iteration's first priority, `medium` and `low` are polish.
 
-But `BLOCKING_SEVERITIES = ['blocker']` (`src/contract.js:98`), and
-*only a blocker defeats a pass; lower severities are polish* passes a `high` gap
-and asserts no repair runs (`tests/alignment.test.mjs:343,351`).
+Resolving the conflict in the wording rather than in the repair trigger was the
+conservative choice: widening the repair trigger changes how many turns a run
+spends, which is a behaviour change that deserves its own decision.
 
-The child is instructed to treat `high` as blocking, the loop does not, and a
-test pins the discrepancy in place. Two defensible resolutions — pick one:
+**Verified.** *only a blocker defeats a pass; lower severities are polish* still
+passes a `high` gap and asserts no repair runs — now testing the documented
+behaviour rather than contradicting it.
 
-- add `'high'` to `BLOCKING_SEVERITIES`, which matches the instruction and
-  upstream's habit of treating anything at or above `high` as must-fix, or
-- reword the schema so only `blocker` blocks, and say `high` is "next iteration's
-  first priority".
-
-Either is fine. Leaving both in place is not.
-
-## W-5 — Receipt `started_at` is the completion time
+## W-5 — Receipt `started_at` was the completion time (fixed)
 
 **Upstream.** `invoke` captures `started_wall` **before** running the operation
-(`core/runtime.py:89`) and appends the event afterwards, so
-`started_at` is a real start and `duration_seconds` is its elapsed time.
+(`core/runtime.py:89`) and appends the event afterwards, so `started_at` is a real
+start and `duration_seconds` is its elapsed time.
 
-**Here.** `RoleMachine.record` (`src/transitions.js:70-86`) sets
-`started_at: new Date(startedAt).toISOString()` at *record* time — after the
-role turn has already finished — while computing `duration_seconds` from the
-`startedAt`/`endedAt` the engine passes in. The duration is right; the timestamp
-is the end.
+**Was.** `RoleMachine.record` stamped `started_at` with `Date.now()` at *record*
+time — after the role turn had finished — while computing `duration_seconds` from
+the real `startedAt`/`endedAt`. The duration was right; the timestamp was the end.
+Proof from the pre-fix run `hoh-20261023-140931-f877a7`: event 1 recorded
+`started_at 06:14:40.523Z` with `duration_seconds 309.162`, and the run itself
+started at `06:09:31.330Z` — the timestamp was where the role *ended*.
 
-**Proof from a real run.** `hoh-20261023-140931-f877a7`, event 1: `started_at`
-is `06:14:40.523Z`, `duration_seconds` is `309.162`, and the run itself started
-at `06:09:31.330Z` — `06:14:40.523 − 309.162 s = 06:09:31.361`, which is the run
-start. The event's own timestamp is where its *first* role ended.
+**Now.** `started_at` comes from `details.startedAt` when the engine supplies it,
+and `duration_seconds` is measured from the same instant.
 
-**Fix.** Set `started_at` from `details.startedAt` when the engine supplies it.
+**Verified.** *a run writes the deterministic-host receipt and the reproducibility
+record* now asserts that each event's `started_at + duration_seconds` lands at or
+before the next event's `started_at`, which a completion-time stamp cannot satisfy.
+
+## W-6 — A project directory was accepted on trust (fixed)
+
+Found by the same review, in code this plugin owns rather than in its port of
+upstream. A run writes `.hoh/` beside the artifact and hands the directory to
+three delegating children, so `projectDir` is the one path a run writes outside
+its own state directory.
+
+**Was.** Any string was accepted: a relative path resolved against whatever the
+host's working directory happened to be, and `projectDir: "/"` or `/etc` would
+scatter run records through a system tree.
+
+**Now.** The value must be absolute and must exist, and it is refused when the
+**real** path lands in a system tree (`/etc`, `/usr`, `/var/db`, …) or in a
+dotfile directory directly under the user's home (`~/.ssh`, `~/.aws`). Two
+details that make the check real rather than decorative:
+
+- **It resolves symlinks first.** `resolve()` is purely lexical, so
+  `/tmp/proj` pointing at `/etc` resolves to the innocent-looking `/tmp/proj`
+  and would pass an exact-match denylist. On macOS `/tmp` is itself a symlink to
+  `/private/tmp`, so this is the ordinary case, not an exotic one. The check runs
+  on `realpathSync()`, and the real path is what the run records, writes under,
+  and hands to the roles as `cwd`.
+- **It matches prefixes, not exact names.** An exact-match denylist lets
+  `/etc/ssl` and `/var/db` straight through — precisely the directories that
+  matter.
+
+This is a guard against accidents, not a sandbox: the host's file policy remains
+the authority on what a role may read or write.
+
+**Verified.** `tests/engine.test.mjs`: *a project directory must be an absolute,
+non-root path*, *a symlinked project directory cannot escape into a refused
+tree* (a real `symlinkSync` to `/etc`), *a missing project directory is refused
+up front*.
+
+## W-7 — A named but dead session silently reused another (fixed)
+
+**Was.** `resolveParent` returned the last root session when the named session
+was not live. A caller could name any session id and have its run parented to a
+different conversation: the roles would appear in that session's subagent list,
+and its `hoh_status` would report a run it never started.
+
+**Now.** A named session must be live; otherwise the start is refused with a
+message naming the session. Only a caller that names no session at all — the
+`hoh_start` tool — falls back to the root session.
+
+**Verified.** *a named session that is not live is refused instead of reusing a
+root session*, *an unnamed session still falls back to the root session*.
+
+## W-8 — Three smaller input-handling defects (fixed)
+
+Found in the same pass; each is small, and each was a real way to get a wrong
+outcome rather than an error.
+
+| Defect | Was | Now |
+|---|---|---|
+| Non-integer iteration budget | `iterations: 3.5` or `"3"` silently became `defaultIterations`, so a caller got a different number of iterations than it asked for | a non-integer is refused |
+| Unescaped prompt fence | the goal was spliced between bare `"""` fences, so a goal containing `"""` closed the block and the rest read as instructions to the role | the delimiter is escaped inside the goal, and the block is labelled as data that cannot change the role |
+| Unbounded request body | `readBody` read whatever the host buffered (16 MiB) before the engine rejected it on length | the declared length and the actual text are both capped near the largest legal request |
+
+`stateDir` was hardened the same way: it comes from profile YAML rather than a
+request, but it is the other place a run writes, so a relative value is now
+refused outright.
+
+**Verified.** *a non-integer iteration budget is refused, not replaced by the
+default*, *a goal cannot break out of its prompt fence* (all three roles).
 
 ---
 
@@ -488,7 +583,7 @@ Recorded so the boundary stays explicit. None of these is a bug; each is a scope
 decision for a DSH-native port.
 
 - **U-1 Read-only workspace copy and integrity hashing.** Upstream both prevents
-  (read-only copy, `bwrap`) and detects (candidate hash before/after, failing the
+  (an isolated workspace per read-only role) and detects (candidate hash before/after, failing the
   attempt as `invalid_candidate_mutation`, `runner.py:1592,1696,1718`). This
   plugin does neither at the workspace level. See A-3's residual.
 - **U-2 External evaluator.** `LoopEngine.run` ends with
@@ -517,10 +612,11 @@ decision for a DSH-native port.
   tooling. This plugin is domain-neutral and ships none of it.
 - **U-7 `attempts`, `n_concurrent`, job directories.** Upstream retries a task up
   to `attempts` (:911) and runs `n_concurrent` trials against `jobs_dir`
-  (:963,1077). Here one run is one sequential trial per session.
+  (`runner.py:885,963`). Here one run is one sequential trial per session.
 - **U-8 Idle timeout.** Upstream kills a role on wall-clock *or* idle timeout
   (`run_command_with_idle_timeout`, `core/execution.py:107`), defaulting to 1800 s
-  per role (`runner.py:949,1040,1061`). Here only `phaseTimeoutSeconds` exists
+  for the Planner and the Tester and 900 s for the Developer
+  (`runner.py:949,1040,1061`). Here only `phaseTimeoutSeconds` exists
   (default 3600), so a role that is alive but emitting nothing burns the full
   ceiling instead of being cut at the idle window.
 - **U-9 demo-id evidence matrix and loop memory.** Upstream's evidence is
@@ -545,7 +641,7 @@ decision for a DSH-native port.
 ## Not read, and therefore not claimed
 
 The adapter and harness layers (`adapters/gamecraft_bench/*`, `harnesses/*`,
-≈9,200 lines) and the vendored Godot tooling were surveyed only far enough to
+≈9,500 lines) and the vendored Godot tooling were surveyed only far enough to
 check the specific claims above. They are benchmark- and domain-specific, which
 is why U-6 stays one line, but **"not read" is the honest status for anything
 inside them** — this document is not a claim that nothing else exists there.
@@ -578,7 +674,7 @@ because "the document was wrong before" is itself part of the record.
 |---|---|
 | Receipt `max_depth` "is the **absolute** depth cap, which is 1 in the ordinary case", and a real run shows `max_depth: 1`. | `src/records.js` writes `config.childMaxDepth`, which is `0` — and all four recorded runs show `0`. The absolute cap (`1`) is computed in `spawnRole` and never recorded. **W-3.** |
 | Role bindings are "serialized with upstream spellings (`workspace_access`, `max_depth`)". | Upstream `RoleBinding.to_dict` has **no** `max_depth`, and has a `tools{godot_mcp, godot_docs}` sub-object this plugin omits. Only `workspace_access` (and `role`/`harness`/`model`/`reasoning_effort`) match. **A-2.** |
-| `npm test` runs "27 tests, including the ten alignment tests". | `31` tests, `13` of them in `tests/alignment.test.mjs` (`13 + 9 + 9`). |
+| `npm test` runs "27 tests, including the ten alignment tests". | The count drifted with every fix: `31` (`13 + 9 + 9`) at the review baseline, `41` (`17 + 15 + 9`) after the review fixes. |
 | "One real run, read as evidence" presented `hoh-20261023-140931-f877a7` as verification of A-1…A-6 after the D-2/D-3 fixes. | That run predates the current source: its last artifact is from 14:36, while `src/engine.js` and `src/contract.js` were last modified at 16:09 and 16:08. Its gaps are all `minor`, a severity **outside** `{blocker, high, medium, low}`, and every tester round is `round: 0`. It is evidence for A-1/A-2/A-3/A-6 and for *the absence* of repair — not for the repaired behaviour. |
 | The old A-3 residual named only the missing read-only copy. | Upstream also **detects** mutation by hashing the candidate; this plugin neither prevents at workspace level nor detects. **U-1** and **A-3**. |
 | The old document called `high` a non-blocking "polish" severity in its tests while the schema told the child that `high` blocks. | Both statements are still in the code; the document had not noticed the conflict. **W-4.** |
@@ -632,7 +728,7 @@ as necessary and a real run as sufficient.
 # How to re-check this document
 
 ```sh
-npm test        # 31 tests, 13 of them in tests/alignment.test.mjs
+npm test        # 41 tests, 17 of them in tests/alignment.test.mjs
 npm run smoke   # parses cordis.patch.yml and cross-checks the presets and tools
 node <plugin-write-skill>/scripts/validate-names.mjs --manifest ./dsh-plugin.naming.json
 ```
@@ -655,7 +751,9 @@ corrections table above does. A run directory is a dated witness.
 ## Rules for the next revision
 
 1. A mechanism belongs in **Part I** only if both the code and a test pin it. If
-   one of the two is missing, it belongs in Part III.
+   one of the two is missing, it is a defect, and it belongs in Part III — a fixed
+   defect stays there as a record with the test that now pins the fix, which is
+   why W-1 … W-8 are still listed after being closed.
 2. An item belongs in **Part II** only with the upstream behaviour it replaces
    written next to it, so a reader can judge the trade rather than trust the
    adjective "better".

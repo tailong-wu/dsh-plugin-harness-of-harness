@@ -24,6 +24,33 @@
 
 不论哪种方式，面板都跟踪这次运行；三个角色都作为该会话的全新 DSH 子代理被委派出去。
 
+## 安装
+
+这是一个预览版。按 Git URL 装进一个 DSH profile：
+
+```sh
+dsh plugin --profile web add github:tailong-wu/dsh-plugin-harness-of-harness
+```
+
+然后重启该 profile 让新插件加载：
+
+```sh
+dsh web
+```
+
+包内自带 `dsh.bundle.patch`，安装即同时加入 **Harness of Harness** 预设和面板，无需额外配置。
+若该 profile 的 `PATH` 上没有 `pnpm`，`dsh plugin` 会在改动任何东西之前先报出来。
+
+想在不动现有 profile 的情况下试用，用一个一次性的：
+
+```sh
+dsh plugin --profile hoh-preview add github:tailong-wu/dsh-plugin-harness-of-harness
+dsh --profile hoh-preview web
+```
+
+需要 DSH `0.2.1-rc.2`（写在 `dsh.compatibility.dshReleases` 里）和 Node `22.5.0` 以上。
+从 Git 安装时会在 `prepare` 阶段构建 Web 客户端，因此首次安装比 npm 渠道略慢。
+
 ## 选择 HoH 模式
 
 在会话的预设选择器里选 **Harness of Harness**（对话标题栏的 `agent-preset` 控件）。这个预设提供：
@@ -126,12 +153,19 @@ profile 在 `dsh.profile.bundles` 里选择这个 bundle；在自己的 `cordis.
 
 ## 要求与限制
 
-- 运行挂在发起它的那个会话之下，因此那个会话必须是活着的。没有它时，Host 会退回到单个根会话。
+- 运行挂在发起它的那个会话之下，因此那个会话必须是活着的。指定一个不在线的会话会被拒绝，
+  而不是悄悄换成另一个；只有完全没指定会话的调用方（`hoh_start` 工具）才回退到单个根会话。
+- 面板是单所有者界面。Host 把调用方认作本机 `owner`，并不向路由暴露「按会话区分」的身份，
+  因此任何拥有 owner 权限的客户端都能用一个它知道的会话 id 去启动、停止或读取运行。
+  这是 Host 对本地应用的信任模型，不是本插件能补上的检查；路由不携带任何凭据，只返回运行状态与文件路径。
+- 项目目录必须是绝对路径且必须存在；若它解析后落在系统目录（`/etc`、`/usr`、`/var/db` 等）
+  或你 home 下的点开头的目录（`~/.ssh`、`~/.aws`），会被拒绝。校验前会先跟随符号链接，
+  因此链接无法把这类目录偷运进来。这是防误操作的保护，不是沙箱：角色实际能读写什么仍由 Host 的文件策略决定。
 - 每个角色都继承会话的模型与权限根。只读角色被委派在一个文件工具无法写入的预设下，但 shell 行仍然保留
-  （QA Tester 要构建和运行项目），而 shell 能写文件。上游用「工作区只读副本」堵住这一点，
-  当前 host 没有向插件提供这种能力——见
+  （QA Tester 要构建和运行项目），而 shell 能写文件。上游的做法是给每个只读角色一份隔离工作区，
+  并对候选目录做前后哈希校验；当前 host 没有向插件提供这种能力——见
   [与上游 HoH 的对齐记录](docs/alignment-with-upstream-hoh.md)。
-- 本插件与上游 HoH 的关系——哪些已对齐、哪些优于上游、哪些弱于上游或刻意不做——逐项记录在
+- 本插件与上游 HoH 的关系——哪些已对齐、哪些优于上游、审核发现并已修掉哪些缺陷、哪些刻意不做——逐项记录在
   [与上游 HoH 的对齐记录](docs/alignment-with-upstream-hoh.md)。
 - HoH 预设的插件清单刻意对齐 DSH 0.2.1-rc.2 内置的 `standard` 预设，但去掉了隔离的 plan-mode 组
   （HoH 通过 Planner 角色来做规划，而 plan mode 的禁写会与 Developer 冲突），也去掉了日程工具。

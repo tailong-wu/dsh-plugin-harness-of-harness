@@ -14,9 +14,13 @@ per-event runtime receipt, the reproducibility record, and repair-then-next
 iterations — is implemented in HoH-lite:
 
   HoH-lite (https://github.com/Flesymeb/HarnessOfHarness)
-  Copyright 2026 Hyoung Yan
+  Copyright 2026 HoH-lite contributors
   Licensed under the Apache License, Version 2.0.
   Its license and notices are retained upstream and apply to that separate work.
+
+  The upstream repository carries two licences. Its paper and demo materials at
+  the repository root are MIT, Copyright (c) 2026 Hyoung Yan; the hoh-lite/
+  source tree this project ports is the Apache-2.0 work credited above.
 
 No HoH-lite source file is copied into this package: the upstream loop is Python
 and this port is JavaScript, and the role prompts, record writers, and engine are
