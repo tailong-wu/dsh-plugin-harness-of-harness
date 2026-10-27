@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Harness of Harness",
+    "description": "Runs the Planner-Developer-Tester continual-development loop with DSH subagents, and shows each iteration in a side panel."
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "policy": "dsh-plugin-naming/v1",
+  "plugin": {
+    "namespace": "hoh",
+    "name": "harness-of-harness",
+    "coordinate": "hoh/harness-of-harness",
+    "packageName": "dsh-plugin-harness-of-harness"
+  },
+  "names": {
+    "pluginNames": [
+      "harness-of-harness",
+      "harness-of-harness-tools",
+      "harness-of-harness-panel"
+    ],
+    "loaderIds": [
+      "hoh-harness-of-harness",
+      "preset-harness-of-harness",
+      "preset-hoh-readonly"
+    ],
+    "services": [
+      "hohHarnessOfHarness"
+    ],
+    "tools": [
+      "hoh_start",
+      "hoh_status",
+      "hoh_stop"
+    ],
+    "commands": [],
+    "skills": [],
+    "skillProviders": [],
+    "events": [],
+    "settingsNamespaces": [],
+    "routes": [
+      {
+        "kind": "exact",
+        "path": "/api/plugins/hoh-harness-of-harness/config"
+      },
+      {
+        "kind": "exact",
+        "path": "/api/plugins/hoh-harness-of-harness/state"
+      },
+      {
+        "kind": "exact",
+        "path": "/api/plugins/hoh-harness-of-harness/start"
+      },
+      {
+        "kind": "exact",
+        "path": "/api/plugins/hoh-harness-of-harness/stop"
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+dsh-plugin-harness-of-harness
+Copyright 2026 tailong-wu
+
+This product is licensed under the Apache License, Version 2.0. See the LICENSE
+file for the complete license text.
+
+--------------------------------------------------------------------------------
+Upstream attribution
+--------------------------------------------------------------------------------
+
+This project is a DeepSeek Harness-native port of the Harness-of-Harness core
+loop. The loop it ports — deterministic Planner/Developer/Tester sequencing, the
+per-event runtime receipt, the reproducibility record, and repair-then-next
+iterations — is implemented in HoH-lite:
+
+  HoH-lite (https://github.com/Flesymeb/HarnessOfHarness)
+  Copyright 2026 Hyoung Yan
+  Licensed under the Apache License, Version 2.0.
+  Its license and notices are retained upstream and apply to that separate work.
+
+No HoH-lite source file is copied into this package: the upstream loop is Python
+and this port is JavaScript, and the role prompts, record writers, and engine are
+independent implementations. The mechanisms they implement are derived from
+HoH-lite, which is why this project carries the same license.
+
+See docs/alignment-with-upstream-hoh.md for the item-by-item record of which
+upstream mechanisms are reproduced, which are improved on, and which are
+deliberately out of scope.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+The only third-party runtime code is used as unmodified npm dependencies, each
+under its own license:
+
+  @deepseek-ai/dsh-tools, @deepseek-ai/schemastery, @deepseek-ai/cordis
+      DeepSeek Harness packages.
+
+No vendored source trees are included in this package.

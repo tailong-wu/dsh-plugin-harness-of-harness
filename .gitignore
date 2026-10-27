@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# NOTE: lib/client.js is intentionally NOT ignored. It is the `./client` export
+# target, and an install from git runs `prepare`, not `prepack` — so a build
+# output that existed only locally would ship as a broken plugin. Keep it
+# committed and rebuild it (`npm run build:client`) whenever client/ changes.
+
+# Packed artifacts and scratch caches
+*.tgz
+.npm-cache-tmp/
+.npmcache*/
+
+# Run records a manual test writes beside the developed project
+.hoh/
+
+# Editor and OS noise
+.DS_Store
+*.log
+.idea/
+.vscode/

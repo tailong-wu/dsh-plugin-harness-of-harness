@@ -1,0 +1,95 @@
+{
+  "name": "dsh-plugin-harness-of-harness",
+  "version": "0.1.0",
+  "description": "Harness-of-Harness mode for DeepSeek Harness: a selectable agent preset whose sessions run the Planner-Developer-Tester continual-development loop over one project, with repair-then-next iterations, receipt and reproducibility records, and a live Web panel.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "harness-of-harness",
+    "hoh",
+    "autonomous",
+    "continual-development",
+    "agent-loop"
+  ],
+  "license": "Apache-2.0",
+  "author": "tailong-wu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tailong-wu/dsh-plugin-harness-of-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tailong-wu/dsh-plugin-harness-of-harness/issues"
+  },
+  "homepage": "https://github.com/tailong-wu/dsh-plugin-harness-of-harness#readme",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json",
+    "./tools": "./tools.js"
+  },
+  "files": [
+    "index.js",
+    "tools.js",
+    "src",
+    "lib",
+    "client",
+    "tests",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "dsh-plugin.naming.json",
+    "README.md",
+    "README.zh.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "NOTICE",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.2": "compatible"
+      }
+    }
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "npm run build:client",
+    "build:client": "node scripts/build-client.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "esbuild": "^0.24.0",
+    "js-yaml": "^4.3.2"
+  }
+}

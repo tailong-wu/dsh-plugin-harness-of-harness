@@ -1,0 +1,234 @@
+# The dsh-plugin-harness-of-harness bundle patch.
+#
+# Two rows are inserted over the composition built so far:
+#
+#   hoh-harness-of-harness   the Host half: the run engine, the service the
+#                            mode's tools consume, and the side panel.
+#   preset-harness-of-harness
+#                            the Harness of Harness agent preset, one selectable
+#                            mode in the session preset picker.
+#
+# Address either row by id from your own `cordis.patch.yml` to change it:
+#
+#   - id: hoh-harness-of-harness
+#     config:
+#       showPanel: false
+#
+# Row order carries no load semantics: activation follows service availability.
+- insert:
+    - id: hoh-harness-of-harness
+      name: dsh-plugin-harness-of-harness
+      config:
+        # Expose the Harness of Harness panel (right-Sidebar tab + header button).
+        showPanel: true
+        # Where a run keeps its development documents and evidence. Empty means
+        # `<project>/.hoh/runs`, i.e. beside the code the loop is developing.
+        stateDir: ''
+        # Default iteration budget offered by the panel and by hoh_start (1-50).
+        defaultIterations: 3
+        # Per-phase wall-clock ceiling in seconds; 0 disables the ceiling.
+        phaseTimeoutSeconds: 3600
+        # Extra delegation levels granted to each role child. 0 keeps a role
+        # from spawning further subagents, so one iteration stays three roles.
+        # The engine adds the role's own depth (1) before sending this to the
+        # subagent service, whose maxDepth is an absolute cap: a grant of 0
+        # becomes a cap of 1, which is what the role itself occupies.
+        childMaxDepth: 0
+
+    # The Harness of Harness mode. Its `plugins` list is this mode's complete
+    # capability set, and it is also what the three delegated roles inherit.
+    #
+    # It intentionally tracks the shipped `standard` preset of DSH 0.2.1-rc.2
+    # with two differences: the persona states the HoH workflow, and this bundle
+    # contributes `hoh_start` / `hoh_status` / `hoh_stop`. Dropped from
+    # `standard`: the isolated plan-mode group (HoH plans through its Planner
+    # role, and plan mode's write ban would fight the Developer) and the
+    # schedule tools.
+    - id: preset-harness-of-harness
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-of-harness
+        name: Harness of Harness
+        description: "Multi-iteration autonomous development: Planner, Developer, and QA Tester loops over one project, run by the agent itself."
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a coding agent powered by the {{model}} model, running DeepSeek Harness in **Harness of Harness (HoH) mode**: multi-iteration autonomous software development with continual improvement.
+
+                Work proceeds as iterations over one project workspace, and every iteration has exactly three roles, in this order:
+
+                1. **Project Planner** — reads the requirements and the previous iteration's evidence, then writes a prioritized development document. It does not modify the artifact.
+                2. **Developer** — implements the development document in the shared workspace while preserving functionality that has already been verified.
+                3. **QA Tester** — executes and inspects the updated artifact against the requirements, recording evidence for verified behavior and unresolved gaps. It does not modify the artifact.
+
+                The artifact and its evidence bundle are the starting state of the next iteration, so the project improves loop by loop. Each run keeps its development documents and evidence bundles under `<project>/.hoh/runs/<run-id>/`, and the Harness of Harness side panel follows the same run.
+
+                You own the loop, not the roles: a run delegates all three roles as fresh subagents, and `hoh_start`, `hoh_status`, and `hoh_stop` are how you start, follow, and cancel one. Do not perform a role's work yourself while a run is live. When the user asks you to build, extend, or continue a project, start a run whose requirements state observable goals, then report each iteration's outcome.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          # This bundle's mode verbs, scoped to sessions that selected this preset.
+          - id: tool-hoh
+            name: 'dsh-plugin-harness-of-harness/tools'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+
+    # The read-only role composition. The engine delegates the Project Planner
+    # and the QA Tester under this preset, so neither role has a file-writing
+    # tool. The Developer inherits the session's own preset instead, because it
+    # must change the artifact.
+    #
+    # Residual gap, recorded in docs/alignment-with-upstream-hoh.md: the shell
+    # rows stay because the QA Tester has to build and run the project, and a
+    # shell can write. Upstream closes that by handing each read-only role a
+    # read-only copy of the candidate workspace, which this host does not offer
+    # to a plugin.
+    - id: preset-hoh-readonly
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: hoh-readonly
+        name: HoH role · read-only
+        description: The Planner and QA Tester toolset of Harness of Harness mode. Reads, searches, and executes, but its file tool cannot write.
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a read-only role in a Harness of Harness iteration: either the Project Planner or the QA Tester.
+
+                You inspect and execute the project, and you report what you found. You do not modify the artifact, and your file tool has no write or edit operation — when a change is needed, describe it as a gap for the Developer instead of making it. Your role's task text below says which of the two roles you are and what you must produce.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: true
+              write: false
+              edit: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            # The row's schema marks this REQUIRED with no default, so a row
+            # that omits it fails activation with "$.allowParallelInProgress
+            # missing required value" and takes the whole role turn down.
+            config:
+              allowParallelInProgress: true
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

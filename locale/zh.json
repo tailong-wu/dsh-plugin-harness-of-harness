@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Harness of Harness",
+    "description": "用 DSH 子代理运行 Planner–Developer–Tester 持续开发循环，并在侧边面板展示每一轮迭代。"
+  }
+}
