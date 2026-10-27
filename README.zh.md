@@ -49,7 +49,10 @@ dsh --profile hoh-preview web
 ```
 
 需要 DSH `0.2.1-rc.2`（写在 `dsh.compatibility.dshReleases` 里）和 Node `22.5.0` 以上。
-从 Git 安装时会在 `prepare` 阶段构建 Web 客户端，因此首次安装比 npm 渠道略慢。
+
+Web 客户端已预构建在 `lib/client.js` 中，且本包不声明 `prepare` 脚本，因此从 Git 安装不会触发构建。
+这一点很重要：pnpm 默认阻止 Git 依赖执行构建脚本，若带 `prepare` 钩子，上面的安装命令会失败，
+直到你用一个随安装而变的 key 显式放行。
 
 ## 选择 HoH 模式
 

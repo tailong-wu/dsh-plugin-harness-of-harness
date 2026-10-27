@@ -54,8 +54,12 @@ dsh --profile hoh-preview web
 ```
 
 Requires DSH `0.2.1-rc.2` (declared in `dsh.compatibility.dshReleases`) and
-Node `22.5.0` or newer. An install from Git builds the Web client during
-`prepare`, so the first install takes a little longer than an npm one.
+Node `22.5.0` or newer.
+
+The Web client is shipped prebuilt in `lib/client.js`, and the package declares
+no `prepare` script, so a Git install runs no build: that matters because pnpm
+blocks build scripts of Git dependencies by default, and a `prepare` hook would
+make the command above fail until you allowed it by an install-specific key.
 
 ## Selecting HoH mode
 

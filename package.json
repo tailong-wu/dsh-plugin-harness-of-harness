@@ -76,7 +76,6 @@
     "build": "npm run build:client",
     "build:client": "node scripts/build-client.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "prepare": "npm run build",
     "prepack": "npm run build",
     "test": "node --test tests/*.test.mjs"
   },

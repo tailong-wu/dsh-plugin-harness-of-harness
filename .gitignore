@@ -2,9 +2,12 @@
 node_modules/
 
 # NOTE: lib/client.js is intentionally NOT ignored. It is the `./client` export
-# target, and an install from git runs `prepare`, not `prepack` — so a build
-# output that existed only locally would ship as a broken plugin. Keep it
-# committed and rebuild it (`npm run build:client`) whenever client/ changes.
+# target and the only thing a git install can load: the package ships no
+# `prepare` script precisely so that installing from git runs no build at all
+# (pnpm blocks git-dependency build scripts by default, which would make the
+# documented install command fail). Keep it committed and rebuild it
+# (`npm run build:client`) whenever client/ changes — `npm run smoke` does not
+# verify this, but a stale bundle is what users get.
 
 # Packed artifacts and scratch caches
 *.tgz
