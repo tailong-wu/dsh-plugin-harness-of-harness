@@ -502,7 +502,9 @@ test('the panel routes expose the defaults, admit a run, and report conflicts', 
 
   const config = await (await dispatch(panel.routes, 'GET', '/api/plugins/hoh-harness-of-harness/config')).json();
   assert.equal(config.enabled, true);
-  assert.equal(config.defaults.projectDir, projectDir);
+  // The suggested directory is the REAL path, and it is one `start()` accepts:
+  // a default the engine would refuse is the bug this pins shut.
+  assert.equal(config.defaults.projectDir, realpathSync(projectDir));
   assert.equal(config.defaults.iterations, 1);
 
   const empty = await dispatch(panel.routes, 'POST', '/api/plugins/hoh-harness-of-harness/start', {
@@ -660,4 +662,30 @@ test('stateDir is held to the same containment as the project directory', async 
   assert.doesNotThrow(() => resolveConfig({ stateDir: '' }), 'empty keeps records beside the project');
   const resolved = resolveConfig({ stateDir: project() });
   assert.ok(resolved.stateDir !== '', 'an ordinary directory is accepted');
+});
+
+/**
+ * The panel's suggested directory must be one `start()` accepts.
+ *
+ * The host's working-directory default is a temp directory or the process cwd,
+ * and the containment guard refuses a bare temp root — so offering that value
+ * unfiltered produced a panel whose Start button failed on its own default with
+ * "Refusing to run a loop over /private/tmp". A default that cannot start is
+ * worse than no default.
+ */
+test('the suggested project directory is one the engine will accept', async () => {
+  // A fallback the guard refuses must degrade to "name one", not to a value that
+  // fails on Start.
+  const refused = makeEngine({ projectDir: '/tmp', behavior: 'never' });
+  assert.equal(refused.engine.defaults().projectDir, '', 'a refused default becomes empty');
+
+  const good = project();
+  const { engine } = makeEngine({ projectDir: good, behavior: 'never' });
+  const suggested = engine.defaults().projectDir;
+  assert.equal(suggested, realpathSync(good), 'the suggestion is the real, checked path');
+  const state = engine.start({ sessionId: 'def', goal: 'x', iterations: 1, projectDir: suggested });
+  assert.equal(state.status, 'running', 'the suggested default must actually start');
+  engine.stop({ sessionId: 'def' });
+  await settled(state);
+  engine.dispose();
 });

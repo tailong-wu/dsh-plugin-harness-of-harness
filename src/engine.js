@@ -348,6 +348,28 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
    * @param parent - the session agent the roles are delegated from, when known.
    * @returns one binding per role.
    */
+  /**
+   * The project directory the panel offers before a run exists.
+   *
+   * The value must be one `start()` will accept. The host's working-directory
+   * default is `process.cwd()` (or a temp directory), and the containment guard
+   * refuses both a system tree and a bare temp root — so offering that value
+   * unfiltered produced a panel whose Start button failed on its own default
+   * with "Refusing to run a loop over /private/tmp". Fall back to the session's
+   * working directory only when it passes the same check, and report an empty
+   * string (which the panel renders as "name one") when nothing usable exists.
+   * @returns a directory the engine will accept, or an empty string.
+   */
+  function usableDefaultDir() {
+    const candidate = fallbackProjectDirectory();
+    if (typeof candidate !== 'string' || candidate.trim() === '') return '';
+    try {
+      return resolveWriteDir(candidate.trim(), { mustExist: false, label: 'The project directory' });
+    } catch {
+      return '';
+    }
+  }
+
   function roleBindings(parent) {
     const effective = absoluteRoleMaxDepth(config.childMaxDepth, parent);
     const bindings = {};
@@ -1040,7 +1062,7 @@ export function createEngine({ ctx, config, fallbackProjectDirectory, pluginVers
      * @returns the default project directory and iteration budget.
      */
     defaults() {
-      return { projectDir: fallbackProjectDirectory(), iterations: config.defaultIterations };
+      return { projectDir: usableDefaultDir(), iterations: config.defaultIterations };
     },
 
     /**
